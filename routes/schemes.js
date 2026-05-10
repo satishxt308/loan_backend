@@ -64,16 +64,23 @@ router.get('/schemas', async (req, res) => {
         `);
         
         // Organize features by type
-        const organizedData = result.rows.map(row => {
-            const features = row.all_features || [];
-            const organized = organizeFeaturesByType(features);
-            
-            return {
-                ...row,
-                ...organized,
-                all_features: undefined // Remove the raw array
-            };
-        });
+      const organizedData = result.rows.map(row => {
+  const features = row.all_features || [];
+  const organized = organizeFeaturesByType(features);
+
+  let imageBase64 = null;
+
+  if (row.icon_image) {
+    imageBase64 = `data:image/png;base64,${row.icon_image.toString('base64')}`;
+  }
+
+  return {
+    ...row,
+    icon_image: imageBase64, // ✅ send usable image
+    ...organized,
+    all_features: undefined
+  };
+});
         
         res.json(organizedData);
     } catch (error) {
@@ -108,13 +115,20 @@ router.get('/schemas/:id', async (req, res) => {
         }
         
         const row = result.rows[0];
-        const organized = organizeFeaturesByType(row.all_features || []);
-        
-        res.json({
-            ...row,
-            ...organized,
-            all_features: undefined
-        });
+const organized = organizeFeaturesByType(row.all_features || []);
+
+let imageBase64 = null;
+
+if (row.icon_image) {
+  imageBase64 = `data:image/png;base64,${row.icon_image.toString('base64')}`;
+}
+
+res.json({
+  ...row,
+  icon_image: imageBase64, // ✅ FIX
+  ...organized,
+  all_features: undefined
+});
         
     } catch (error) {
         console.error(error);
@@ -123,7 +137,7 @@ router.get('/schemas/:id', async (req, res) => {
 });
 
 // POST create new schema - COMPLETELY FIXED
-router.post('/schemas/add', async (req, res) => {
+router.post('/schemas/add', async (req, res) => { 
     const client = await pool.connect();
     let schemaId; // Declare schemaId here so it's accessible in catch block
     
@@ -139,6 +153,7 @@ router.post('/schemas/add', async (req, res) => {
             full_description,
             rating,
             enrolled_count,
+            iconImage,
             features,
             coverage_details,
             key_benefits,
@@ -146,6 +161,9 @@ router.post('/schemas/add', async (req, res) => {
             documents_required
         } = req.body;
         
+        const iconBuffer = iconImage 
+  ? Buffer.from(iconImage, "base64") 
+  : null;
         // Check if schema name already exists
         const existingSchema = await client.query(
             'SELECT id FROM schemes WHERE schema_name = $1',
@@ -163,21 +181,23 @@ router.post('/schemas/add', async (req, res) => {
         // Insert into schemes table
         const schemeResult = await client.query(`
             INSERT INTO schemes (
-                schema_name, schema_type, short_description, 
-                amount, frequency, full_description, 
-                rating, enrolled_count
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id
+    schema_name, schema_type, short_description, 
+    amount, frequency, full_description, 
+    rating, enrolled_count, icon_image
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+RETURNING id
         `, [
-            schema_name, 
-            schema_type, 
-            short_description || '',
-            parseFloat(amount) || 0, 
-            frequency, 
-            full_description || '',
-            parseFloat(rating) || 4.8, 
-            parseInt(enrolled_count) || 2500
-        ]);
+  schema_name,
+  schema_type,
+  short_description || '',
+  parseFloat(amount) || 0,
+  frequency,
+  full_description || '',
+  parseFloat(rating) || 4.8,
+  parseInt(enrolled_count) || 2500,
+  iconBuffer
+]);
         
         schemaId = schemeResult.rows[0].id; // Assign to the outer variable
         
@@ -335,6 +355,7 @@ router.put('/schemas/edit/:id', async (req, res) => {
             full_description,
             rating,
             enrolled_count,
+            iconImage,
             features,
             coverage_details,
             key_benefits,
@@ -342,31 +363,49 @@ router.put('/schemas/edit/:id', async (req, res) => {
             documents_required
         } = req.body;
         
+        let iconBuffer = null;
+
+if (iconImage) {
+  const base64Data = iconImage.includes('base64,')
+    ? iconImage.split('base64,')[1]
+    : iconImage;
+
+  iconBuffer = Buffer.from(base64Data, "base64");
+}
+
         // Update schemes table
         await client.query(`
-            UPDATE schemes SET
-                schema_name = $1,
-                schema_type = $2,
-                short_description = $3,
-                amount = $4,
-                frequency = $5,
-                full_description = $6,
-                rating = $7,
-                enrolled_count = $8,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $9
-        `, [
-            schema_name, schema_type, short_description,
-            parseFloat(amount) || 0, frequency, full_description,
-            parseFloat(rating) || 4.8, parseInt(enrolled_count) || 2500,
-            id
-        ]);
+           UPDATE schemes SET
+    schema_name = $1,
+    schema_type = $2,
+    short_description = $3,
+    amount = $4,
+    frequency = $5,
+    full_description = $6,
+    rating = $7,
+    enrolled_count = $8,
+    icon_image = COALESCE($9, icon_image),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $10
+        `,[
+  schema_name,
+  schema_type,
+  short_description,
+  parseFloat(amount) || 0,
+  frequency,
+  full_description,
+  parseFloat(rating) || 4.8,
+  parseInt(enrolled_count) || 2500,
+  iconBuffer,
+  id
+]);
         
         // Delete existing features
         await client.query('DELETE FROM scheme_features WHERE scheme_id = $1', [id]);
         
         // Insert new features
         const featureInserts = [];
+        
         
         // Insert features
         if (features && Array.isArray(features) && features.length > 0) {
@@ -608,12 +647,17 @@ router.post('/schema-types/add', async (req, res) => {
   console.error(err);
 
   if (err.response?.status === 409) {
-    Swal.fire({
-      title: "Duplicate Schema",
-      text: "A schema with this name already exists. Please use a different name.",
-      icon: "warning",
-      confirmButtonColor: "#2ED197"
-    });
+   if (err.code === '23505') {
+  return res.status(409).json({
+    success: false,
+    error: 'Type already exists'
+  });
+}
+
+res.status(500).json({
+  success: false,
+  error: 'Failed to add schema type'
+});
   } else {
     Swal.fire({
       title: "Error!",

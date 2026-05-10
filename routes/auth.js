@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require("../db/db");
 const bcrypt = require("bcryptjs");
 const { Resend } = require("resend");
+const emailTemplates = require("../utils/emailTemplates");
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const multer = require("multer");
@@ -106,7 +107,7 @@ router.post("/login", async (req, res) => {
 
     // Check if user is active
     if (!userData.is_active) {
-      let contactMessage = "Please contact with admin 8789786789 or admin@PSWB.com";
+      let contactMessage = "Please contact with admin 9876543210 or pswinners2025@gmail.com";
       
       if (userData.created_by) {
         if (userData.created_by_name) {
@@ -163,60 +164,93 @@ router.post("/login", async (req, res) => {
     });
   }
 });
-
 router.post("/forgot-password", async (req, res) => {
   const { email } = req.body;
-  const emailNormalized = email.toLowerCase();
-
-  const user = await pool.query(
-    "SELECT id, otp_verified FROM users WHERE LOWER(email) = $1",
-    [emailNormalized]
-  );
-
-  // ❌ NOT REGISTERED OR NOT VERIFIED
-  if (user.rows.length === 0 || !user.rows[0].otp_verified) {
-    return res.status(400).json({
-      success: false,
-      message: "Mail not registered yet"
-    });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000);
-
-  global.forgotOtpStore = global.forgotOtpStore || {};
-
-  global.forgotOtpStore[emailNormalized] = {
-    otp,
-    expires: Date.now() + 5 * 60 * 1000
-  };
-
-  console.log("OTP IS:", otp);
+  const emailNormalized = email.toLowerCase().trim();
 
   try {
+    const user = await pool.query(
+      `
+      SELECT 
+        id,
+        full_name,
+        otp_verified,
+        is_active
+      FROM users 
+      WHERE LOWER(email) = $1
+      `,
+      [emailNormalized]
+    );
+
+    // ❌ EMAIL NOT FOUND
+    if (user.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Mail not registered"
+      });
+    }
+
+    const userData = user.rows[0];
+
+    // ❌ EMAIL NOT VERIFIED
+    if (!userData.otp_verified) {
+      return res.status(400).json({
+        success: false,
+        message: "Email not verified yet"
+      });
+    }
+
+    // ❌ USER BLOCKED / INACTIVE
+    if (!userData.is_active) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Please contact with admin 9876543210 or pswinners2025@gmail.com"
+      });
+    }
+
+    // ✅ GENERATE OTP
+    const otp = Math.floor(100000 + Math.random() * 900000);
+    const userName = userData.full_name || "";
+
+    global.forgotOtpStore = global.forgotOtpStore || {};
+
+    global.forgotOtpStore[emailNormalized] = {
+      otp,
+      expires: Date.now() + 5 * 60 * 1000
+    };
+
+    console.log("OTP IS:", otp);
+
+    // ✅ SEND EMAIL
     const emailResponse = await resend.emails.send({
       from: process.env.FROM_EMAIL,
       to: emailNormalized,
-      subject: "Reset Password OTP",
-      html: `<h2>${otp}</h2>`
+      subject: "🔐 Password Reset Request - PSWB",
+      html: emailTemplates.getPasswordResetTemplate(otp, userName)
     });
 
     if (emailResponse?.error) {
+      console.error("Email Error:", emailResponse.error);
+
       return res.status(500).json({
         success: false,
         message: "Failed to send OTP"
       });
     }
 
-    // ✅ IMPORTANT (YOU FORGOT THIS)
+    // ✅ SUCCESS
     return res.json({
       success: true,
       message: "OTP sent successfully"
     });
 
-  } catch (err) {
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Email sending failed"
+      message: "Server error. Please try again later."
     });
   }
 });

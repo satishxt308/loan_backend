@@ -19,15 +19,20 @@ const createNotification = async (userId, title, message) => {
 // Helper function to check if all documents are approved
 const areAllDocumentsApproved = async (userId) => {
   const result = await pool.query(
-    `SELECT COUNT(*) as total, 
-            COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_count
+    `SELECT 
+        COUNT(*)::int as total,
+        COUNT(CASE WHEN status = 'approved' THEN 1 END)::int as approved_count
      FROM emp_documents 
      WHERE user_id = $1`,
     [userId]
   );
-  
+
   const { total, approved_count } = result.rows[0];
-  return total > 0 && total === parseInt(approved_count);
+
+  console.log("TOTAL:", total);
+  console.log("APPROVED:", approved_count);
+
+  return total > 0 && total === approved_count;
 };
 
 const generateEmployeeId = async () => {
@@ -75,7 +80,7 @@ router.get("/employees", async (req, res) => {
     // Transform data to match frontend expectations
     const employees = result.rows.map(emp => ({
       id: emp.id,
-      employee_id: emp.employee_id || `EMP${emp.id.toString().padStart(4, '0')}`,
+      employee_id: emp.employee_id,
       full_name: emp.full_name,
       email: emp.email,
       phone: emp.phone_number,
@@ -147,7 +152,7 @@ router.get("/employees/:id", async (req, res) => {
     // Format response for frontend
     const employee = {
       id: emp.id,
-      employee_id: emp.employee_id || `EMP${emp.id.toString().padStart(4, '0')}`,
+      employee_id: emp.employee_id,
       full_name: emp.full_name,
       email: emp.email,
       phone: emp.phone_number,
@@ -277,114 +282,117 @@ router.put("/employees/:id", async (req, res) => {
 // VERIFY EMPLOYEE (Final Verification)
 // Generates Employee ID and sets emp_card_verified = true
 // ==============================
+// ==============================
+// VERIFY EMPLOYEE
+// ==============================
 router.post("/employees/:id/verify", async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Check if employee exists
+
+    // Get employee
     const userResult = await pool.query(
-      `SELECT id, full_name, email, emp_card_verified, employee_id 
-       FROM users WHERE id = $1 AND role = 'employee'`,
+      `SELECT 
+          id,
+          full_name,
+          employee_id,
+          emp_card_verified
+       FROM users
+       WHERE id = $1
+       AND role = 'employee'`,
       [id]
     );
 
     if (userResult.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Employee not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
     }
 
     const user = userResult.rows[0];
 
-let employeeId = user.employee_id;
+    // Prevent second click
+    if (user.emp_card_verified === true || user.employee_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Employee already verified",
+      });
+    }
 
-// If already verified but NO employee_id → generate it
-if (user.emp_card_verified && !user.employee_id) {
-  employeeId = await generateEmployeeId();
-  
-  await pool.query(
-    `UPDATE users 
-     SET employee_id = $1,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $2`,
-    [employeeId, id]
-  );
-
-  return res.json({
-    success: true,
-    message: "Employee ID generated successfully",
-    data: { employee_id: employeeId }
-  });
-}
-
-// If already verified AND already has ID → no action
-if (user.emp_card_verified && user.employee_id) {
-  return res.json({
-    success: true,
-    message: "Employee already verified",
-    data: { employee_id: user.employee_id }
-  });
-}
-
-    // Check if card is approved
+    // Check employee card approved
     const cardResult = await pool.query(
-      `SELECT status FROM emp_cards WHERE user_id = $1`,
-      [id]
-    );
-
-    const cardStatus = cardResult.rows[0]?.status;
-    if (cardStatus !== 'approved') {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Employee card must be approved first" 
-      });
-    }
-
-    // Check if all documents are approved
-    const allDocsApproved = await areAllDocumentsApproved(id);
-    if (!allDocsApproved) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "All documents must be approved first" 
-      });
-    }
-
-    // Generate employee ID
-    employeeId = await generateEmployeeId();
-
-    // Update user: set emp_card_verified = true and assign employee_id
-    await pool.query(
-      `UPDATE users 
-       SET emp_card_verified = true, 
-           emp_card = true,
-           employee_id = $1,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2`,
-      [employeeId, id]
-    );
-
-    // Update emp_cards status to verified
-    await pool.query(
-      `UPDATE emp_cards 
-       SET status = 'verified', updated_at = CURRENT_TIMESTAMP
+      `SELECT status
+       FROM emp_cards
        WHERE user_id = $1`,
       [id]
     );
 
-    // Create success notification
-    await createNotification(
-      user.id,
-      "🎉 Employee ID Generated!",
-      `Dear ${user.full_name}, your employee ID has been generated: ${employeeId}. You are now a verified employee!`
+    const cardStatus = cardResult.rows[0]?.status;
+
+    if (cardStatus !== "approved") {
+      return res.status(400).json({
+        success: false,
+        message: "Employee card must be approved first",
+      });
+    }
+
+    // Check all documents approved
+    const allDocsApproved = await areAllDocumentsApproved(id);
+
+    if (!allDocsApproved) {
+      return res.status(400).json({
+        success: false,
+        message: "All documents must be approved first",
+      });
+    }
+
+    // Generate employee ID
+    const employeeId = await generateEmployeeId();
+
+    // Update user
+    await pool.query(
+      `UPDATE users
+       SET
+         employee_id = $1,
+         emp_card_verified = true,
+         emp_card = true,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [employeeId, id]
     );
 
-    res.json({ 
-      success: true, 
+    // Update emp card status
+    await pool.query(
+      `UPDATE emp_cards
+       SET
+         status = 'verified',
+         updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $1`,
+      [id]
+    );
+
+    // Notification
+    await createNotification(
+      id,
+      "🎉 Employee Verified",
+      `Your Employee ID has been generated successfully. Employee ID: ${employeeId}`
+    );
+
+    return res.json({
+      success: true,
       message: "Employee verified successfully",
-      data: { employee_id: employeeId }
+      data: {
+        employee_id: employeeId,
+      },
     });
 
   } catch (err) {
     console.error("❌ Verify Employee Error:", err);
-    res.status(500).json({ success: false, message: err.message });
+
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 });
 

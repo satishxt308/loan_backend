@@ -2,86 +2,155 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db/db");
 
+// ✅ Helper response
+const success = (res, message, data = {}) =>
+  res.json({ success: true, msg: message, data });
 
-// ✅ GET WALLET + HISTORY
-router.get("/:userId", async (req, res) => {
+const fail = (res, message, code = 400) =>
+  res.status(code).json({ success: false, msg: message });
+
+router.get("/user/:userId", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    const wallet = await db.query(
-      "SELECT * FROM wallets WHERE user_id=$1",
+    // ✅ GET BALANCE FROM USERS TABLE
+    const userRes = await db.query(
+      `SELECT wallet_balance FROM users WHERE id=$1`,
       [userId]
     );
 
-    const history = await db.query(
-      "SELECT * FROM wallet_transactions WHERE user_id=$1 ORDER BY id DESC",
+    const balance = Number(userRes.rows[0]?.wallet_balance || 0);
+
+    // ✅ PENDING AMOUNT
+    const pendingRes = await db.query(
+      `SELECT 
+        COALESCE(SUM(amount),0) as pending
+      FROM wallet_transactions
+      WHERE user_id=$1 AND status='PENDING'`,
+      [userId]
+    );
+
+    // ✅ ALL TRANSACTIONS
+    const trxRes = await db.query(
+      `SELECT * FROM wallet_transactions
+       WHERE user_id=$1
+       ORDER BY id DESC`,
       [userId]
     );
 
     res.json({
-      balance: wallet.rows[0]?.balance || 0,
-      transactions: history.rows,
+      balance: balance,
+      pending: Number(pendingRes.rows[0].pending || 0),
+      transactions: trxRes.rows,
     });
+
   } catch (err) {
+    console.error("Wallet fetch error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+router.get("/admin/all-requests", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT wt.*, u.full_name, u.email, u.phone_number, u.employee_id
+      FROM wallet_transactions wt
+      JOIN users u ON wt.user_id = u.id
+      ORDER BY wt.id DESC
+    `);
+
+    res.json({
+      success: true,
+      requests: result.rows
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: "Failed to fetch requests" });
+  }
+});
+
+router.get("/admin/stats", async (req, res) => {
+  try {
+    const stats = await db.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status='PENDING') AS pending_count,
+        COUNT(*) FILTER (WHERE status='APPROVED') AS approved_count,
+        COUNT(*) FILTER (WHERE status='REJECTED') AS rejected_count,
+
+        COALESCE(SUM(amount) FILTER (WHERE status='PENDING' AND type='ADD'),0) AS pending_add_amount,
+        COALESCE(SUM(amount) FILTER (WHERE status='PENDING' AND type='WITHDRAW'),0) AS pending_withdraw_amount,
+
+        COALESCE(SUM(amount) FILTER (WHERE status='APPROVED' AND type='ADD'),0) AS total_added,
+        COALESCE(SUM(amount) FILTER (WHERE status='APPROVED' AND type='WITHDRAW'),0) AS total_withdrawn
+      FROM wallet_transactions
+    `);
+
+    res.json({
+      success: true,
+      stats: stats.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: "Failed to fetch stats" });
+  }
+});
+
+// ✅ ADD MONEY
 router.post("/add", async (req, res) => {
   const { user_id, amount, utr, note, screenshot } = req.body;
 
   try {
-    console.log("📥 Incoming Data:", req.body);
+    if (!user_id || !amount || !utr || !screenshot) {
+      return fail(res, "All fields are required");
+    }
+
+    if (amount < 100) {
+      return fail(res, "Minimum amount is ₹100");
+    }
 
     const user = await db.query(
-      "SELECT id, employee_id FROM users WHERE id=$1",
+      "SELECT employee_id FROM users WHERE id=$1",
       [user_id]
     );
 
-    console.log("👤 User Data:", user.rows);
-
     if (!user.rows.length) {
-      console.log("❌ User not found");
-      return res.status(400).json({ msg: "User not found" });
+      return fail(res, "User not found");
     }
 
     if (!user.rows[0].employee_id) {
-      console.log("❌ employee_id missing for user:", user.rows[0]);
-      return res.status(400).json({ msg: "Apply for Employee ID" });
+      return fail(res, "Apply for Employee ID first");
     }
 
-    console.log("✅ Employee verified");
-
-    // continue...
-
     const pending = await db.query(
-      "SELECT * FROM wallet_transactions WHERE user_id=$1 AND status='PENDING'",
+      "SELECT 1 FROM wallet_transactions WHERE user_id=$1 AND status='PENDING'",
       [user_id]
     );
 
-    if (pending.rows.length > 0) {
-      return res.status(400).json({ msg: "Pending request exists" });
+    if (pending.rows.length) {
+      return fail(res, "You already have a pending request");
     }
 
-    // ✅ CONVERT BASE64 → BUFFER
-    let imageBuffer = null;
-    if (screenshot) {
-      imageBuffer = Buffer.from(screenshot, "base64");
-    }
+    const imageBuffer = Buffer.from(screenshot, "base64");
 
     await db.query(
       `INSERT INTO wallet_transactions 
-      (user_id, type, amount, utr, note, screenshot)
-      VALUES ($1,'ADD',$2,$3,$4,$5)`,
+       (user_id, type, amount, utr, note, screenshot, status)
+       VALUES ($1,'ADD',$2,$3,$4,$5,'PENDING')`,
       [user_id, amount, utr, note, imageBuffer]
     );
 
-    res.json({ msg: "Request submitted" });
+    success(res, "Money add request submitted");
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    fail(res, "Failed to submit request", 500);
   }
 });
 
+
+// ✅ WITHDRAW
 router.post("/withdraw", async (req, res) => {
   const {
     user_id,
@@ -94,142 +163,59 @@ router.post("/withdraw", async (req, res) => {
   } = req.body;
 
   try {
-    // check pending
-    const pending = await db.query(
-      "SELECT * FROM wallet_transactions WHERE user_id=$1 AND status='PENDING'",
+    if (!user_id || !amount) {
+      return fail(res, "Amount is required");
+    }
+
+    if (amount < 100) {
+      return fail(res, "Minimum withdrawal is ₹100");
+    }
+
+    const user = await db.query(
+      "SELECT wallet_balance FROM users WHERE id=$1",
       [user_id]
     );
 
-    if (pending.rows.length > 0) {
-      return res.status(400).json({ msg: "Pending request exists" });
+    const balance = Number(user.rows[0]?.wallet_balance || 0);
+
+    if (balance < amount) {
+      return fail(res, `Insufficient balance. Available ₹${balance}`);
+    }
+
+    const pending = await db.query(
+      "SELECT 1 FROM wallet_transactions WHERE user_id=$1 AND status='PENDING'",
+      [user_id]
+    );
+
+    if (pending.rows.length) {
+      return fail(res, "Complete previous request first");
     }
 
     await db.query(
       `INSERT INTO wallet_transactions 
-      (user_id, type, amount, payment_method, bank_name, account_holder, ifsc_code, upi_id)
-      VALUES ($1,'WITHDRAW',$2,$3,$4,$5,$6,$7)`,
+       (user_id, type, amount, payment_method, bank_name, account_holder, ifsc_code, upi_id, status)
+       VALUES ($1,'WITHDRAW',$2,$3,$4,$5,$6,$7,'PENDING')`,
       [user_id, amount, payment_method, bank_name, account_holder, ifsc_code, upi_id]
     );
 
-    res.json({ msg: "Withdraw request sent" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ✅ GET USER PAYMENT DETAILS (BANK + UPI)
-router.get("/payment-details/:userId", async (req, res) => {
-  const { userId } = req.params;
-
-  try {
-    const result = await db.query(
-      `SELECT 
-        id,
-        type,
-        amount,
-        payment_method,
-        bank_name,
-        account_holder,
-        ifsc_code,
-        upi_id,
-        status,
-        created_at
-       FROM wallet_transactions
-       WHERE user_id = $1
-       AND type = 'WITHDRAW'
-       ORDER BY id DESC`,
-      [userId]
-    );
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-
-  } catch (err) {
-    console.error("Error fetching payment details:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get("/user/:userId", async (req, res) => {
-  const { userId } = req.params;
-
-  try {
-    // ✅ BALANCE (only APPROVED)
-    const balanceRes = await db.query(
-      `SELECT 
-        COALESCE(SUM(
-          CASE 
-            WHEN type='ADD' AND status='APPROVED' THEN amount
-            WHEN type='WITHDRAW' AND status='APPROVED' THEN -amount
-            ELSE 0
-          END
-        ),0) as balance
-      FROM wallet_transactions
-      WHERE user_id=$1`,
-      [userId]
-    );
-
-    // ✅ PENDING
-    const pendingRes = await db.query(
-      `SELECT 
-        COALESCE(SUM(amount),0) as pending
-      FROM wallet_transactions
-      WHERE user_id=$1 AND status='PENDING'`,
-      [userId]
-    );
-
-    // ✅ TRANSACTIONS
-    const trxRes = await db.query(
-      `SELECT * FROM wallet_transactions
-       WHERE user_id=$1
-       ORDER BY id DESC`,
-      [userId]
-    );
-
-    res.json({
-      balance: balanceRes.rows[0].balance,
-      pending: pendingRes.rows[0].pending,
-      transactions: trxRes.rows,
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Add to your wallet routes file
-
-// Employee cancel their own pending request
-router.put("/employee/cancel/:id", async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  
-  try {
-    const trx = await db.query(
-      "SELECT * FROM wallet_transactions WHERE id=$1 AND status='PENDING'",
-      [id]
-    );
-    
-    if (!trx.rows.length) {
-      return res.status(404).json({ msg: "Request not found or already processed" });
-    }
-    
     await db.query(
-      "UPDATE wallet_transactions SET status=$1 WHERE id=$2",
-      [status, id]
+      `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id=$2`,
+      [amount, user_id]
     );
-    
-    res.json({ msg: "Request cancelled successfully" });
+
+    success(res, "Withdrawal request submitted");
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    fail(res, "Withdrawal failed", 500);
   }
 });
 
+
+// ✅ ADMIN UPDATE
 router.put("/admin/update/:id", async (req, res) => {
-  const { status, reject_reason } = req.body;
   const { id } = req.params;
+  const { status, reject_reason } = req.body;
 
   try {
     const trx = await db.query(
@@ -237,18 +223,19 @@ router.put("/admin/update/:id", async (req, res) => {
       [id]
     );
 
-    const data = trx.rows[0];
-    if (!data) return res.status(404).json({ msg: "Not found" });
-
-    if (data.status !== "PENDING") {
-      return res.status(400).json({ msg: "Already processed" });
+    if (!trx.rows.length) {
+      return fail(res, "Transaction not found");
     }
 
-    // ✅ Update transaction
+    const data = trx.rows[0];
+
+    if (data.status !== "PENDING") {
+      return fail(res, "Already processed");
+    }
+
     await db.query(
       `UPDATE wallet_transactions 
-       SET status=$1,
-           reject_reason=$2
+       SET status=$1, reject_reason=$2
        WHERE id=$3`,
       [
         status,
@@ -257,89 +244,38 @@ router.put("/admin/update/:id", async (req, res) => {
       ]
     );
 
-    // ✅ Wallet balance update
-    if (status === "APPROVED") {
+    // 💰 LOGIC
+    if (status === "APPROVED" && data.type === "ADD") {
       await db.query(
-        `UPDATE wallets 
-         SET balance = balance + $1 
-         WHERE user_id=$2`,
+        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2`,
         [data.amount, data.user_id]
       );
     }
 
-    // 🔥 INSERT NOTIFICATION
-    let title = "";
-    let message = "";
-
-    if (status === "APPROVED") {
-      title = "✅ Request Approved";
-      message = `Your ${data.type} request of ₹${data.amount} has been approved.`;
-    } else if (status === "REJECTED") {
-      title = "❌ Request Rejected";
-      message = `Your ${data.type} request of ₹${data.amount} was rejected. Reason: ${reject_reason}`;
+    if (status === "REJECTED" && data.type === "WITHDRAW") {
+      await db.query(
+        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2`,
+        [data.amount, data.user_id]
+      );
     }
+
+    // 🔔 Notification
+    const message =
+      status === "APPROVED"
+        ? `Your ${data.type} request ₹${data.amount} approved`
+        : `Your ${data.type} request rejected: ${reject_reason}`;
 
     await db.query(
       `INSERT INTO notifications (user_id, title, message)
-       VALUES ($1, $2, $3)`,
-      [data.user_id, title, message]
+       VALUES ($1,$2,$3)`,
+      [data.user_id, status, message]
     );
 
-    res.json({ msg: "Updated successfully" });
+    success(res, "Request updated");
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Add to your wallet routes file - GET ALL REQUESTS FOR ADMIN
-router.get("/admin/all-requests", async (req, res) => {
-  try {
-    // Fetch all wallet transactions with user details
-    const result = await db.query(`
-      SELECT 
-        wt.*,
-        u.full_name,
-        u.email,
-        u.phone_number,
-        u.employee_id
-      FROM wallet_transactions wt
-      JOIN users u ON wt.user_id = u.id
-      ORDER BY wt.id DESC
-    `);
-    
-    res.json({
-      success: true,
-      requests: result.rows
-    });
-  } catch (err) {
-    console.error("Error fetching all requests:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get request statistics for admin dashboard
-router.get("/admin/stats", async (req, res) => {
-  try {
-    const stats = await db.query(`
-      SELECT 
-        COUNT(CASE WHEN status = 'PENDING' THEN 1 END) as pending_count,
-        COUNT(CASE WHEN status = 'APPROVED' THEN 1 END) as approved_count,
-        COUNT(CASE WHEN status = 'REJECTED' THEN 1 END) as rejected_count,
-        COALESCE(SUM(CASE WHEN status = 'PENDING' AND type = 'ADD' THEN amount ELSE 0 END), 0) as pending_add_amount,
-        COALESCE(SUM(CASE WHEN status = 'PENDING' AND type = 'WITHDRAW' THEN amount ELSE 0 END), 0) as pending_withdraw_amount,
-        COALESCE(SUM(CASE WHEN status = 'APPROVED' AND type = 'ADD' THEN amount ELSE 0 END), 0) as total_added,
-        COALESCE(SUM(CASE WHEN status = 'APPROVED' AND type = 'WITHDRAW' THEN amount ELSE 0 END), 0) as total_withdrawn
-      FROM wallet_transactions
-    `);
-    
-    res.json({
-      success: true,
-      stats: stats.rows[0]
-    });
-  } catch (err) {
-    console.error("Error fetching stats:", err);
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    fail(res, "Update failed", 500);
   }
 });
 

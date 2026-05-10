@@ -198,12 +198,7 @@ router.put("/upload-image/:id", async (req, res) => {
 
 router.post("/save-info-by-employee", async (req, res) => {
   try {
-    const {
-      studentId,
-      employeeId,
-      category,
-      ...data
-    } = req.body;
+    const { studentId, category, ...data } = req.body;
 
     if (!studentId || !category) {
       return res.status(400).json({
@@ -212,41 +207,111 @@ router.post("/save-info-by-employee", async (req, res) => {
       });
     }
 
-    const applicationId = generateApplicationId(); // ✅ NEW
+    // ✅ CHECK EXISTING
+    const existing = await pool.query(
+      "SELECT id FROM applications WHERE user_id = $1 LIMIT 1",
+      [studentId]
+    );
+
+    let applicationId;
+
+    // --------------------------------------
+    // ✅ UPDATE
+    // --------------------------------------
+    if (existing.rows.length > 0) {
+      applicationId = existing.rows[0].id;
+
+      await pool.query(
+        `UPDATE applications SET
+          category=$2,
+          aadhaar_number=$3,
+          full_address=$4,
+          pan_number=$5,
+          class=$6,
+          board=$7,
+          school_name=$8,
+          stream=$9,
+          previous_class=$10,
+          previous_class_result=$11,
+          tenth_marks=$12,
+          tenth_board=$13,
+          tenth_school_name=$14,
+          year=$15,
+          semester=$16,
+          degree=$17,
+          college_name=$18,
+          university_name=$19,
+          previous_sem_result=$20,
+          twelfth_marks=$21,
+          twelfth_board=$22,
+          twelfth_school_name=$23,
+          employment_status=$24,
+          loan_reason=$25,
+          guardian_name=$26,
+          guardian_number=$27,
+          guardian_relation=$28,
+          guardian_aadhaar=$29,
+          guardian_pan=$30,
+          last_updated = NOW()
+        WHERE user_id = $1`,
+        [
+          studentId,
+          category,
+          data.aadhaarNumber,
+          data.fullAddress,
+          data.panNumber,
+          data.class,
+          data.board,
+          data.schoolName,
+          data.stream,
+          data.previousClass,
+          data.previousClassResult,
+          data.tenthMarks,
+          data.tenthBoard,
+          data.tenthSchoolName,
+          data.year,
+          data.semester,
+          data.degree,
+          data.collegeName,
+          data.universityName,
+          data.previousSemResult,
+          data.twelfthMarks,
+          data.twelfthBoard,
+          data.twelfthSchoolName,
+          data.employmentStatus,
+          data.loanReason,
+          data.guardianName,
+          data.guardianNumber,
+          data.guardianRelation,
+          data.guardianAadhaar,
+          data.guardianPAN
+        ]
+      );
+
+      return res.json({
+        success: true,
+        message: "Updated successfully",
+        formId: applicationId,
+      });
+    }
+
+    // --------------------------------------
+    // ✅ INSERT
+    // --------------------------------------
+    applicationId = generateApplicationId();
 
     const result = await pool.query(
       `INSERT INTO applications (
-        id,
-        user_id,
-        category,
-        aadhaar_number,
-        full_address,
-        pan_number,
-        class,
-        board,
-        school_name,
-        stream,
-        previous_class,
-        previous_class_result,
-        tenth_marks,
-        tenth_board,
-        tenth_school_name,
-        year,
-        semester,
-        degree,
-        college_name,
-        university_name,
-        previous_sem_result,
-        twelfth_marks,
-        twelfth_board,
-        twelfth_school_name,
-        employment_status,
-        loan_reason,
-        guardian_name,
-        guardian_number,
-        guardian_relation,
-        guardian_aadhaar,
-        guardian_pan
+        id, user_id, category,
+        aadhaar_number, full_address, pan_number,
+        class, board, school_name, stream,
+        previous_class, previous_class_result,
+        tenth_marks, tenth_board, tenth_school_name,
+        year, semester, degree, college_name, university_name,
+        previous_sem_result, twelfth_marks, twelfth_board, twelfth_school_name,
+        employment_status, loan_reason,
+        guardian_name, guardian_number, guardian_relation,
+        guardian_aadhaar, guardian_pan
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
@@ -254,8 +319,8 @@ router.post("/save-info-by-employee", async (req, res) => {
       )
       RETURNING id`,
       [
-        applicationId,     // ✅ id
-        studentId,         // ✅ user_id (correct now)
+        applicationId,
+        studentId,
         category,
         data.aadhaarNumber,
         data.fullAddress,
@@ -288,8 +353,9 @@ router.post("/save-info-by-employee", async (req, res) => {
       ]
     );
 
-    res.json({
+    return res.json({
       success: true,
+      message: "Created successfully",
       formId: result.rows[0].id,
     });
 

@@ -125,6 +125,113 @@ router.put("/applications/:id", async (req, res) => {
       [id]
     );
 
+    router.post("/upload-by-employee", upload.array("documents"), async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const student_id = parseInt(req.body.user_id);      // 👈 student
+    const employee_id = parseInt(req.body.uploaded_by); // 👈 employee
+    const docs = req.files;
+
+    if (!student_id) {
+      return res.status(400).json({ success: false, error: "Student ID required" });
+    }
+
+    // 1️⃣ Get or create application for student
+    let application = await client.query(
+      "SELECT id FROM applications WHERE user_id = $1 LIMIT 1",
+      [student_id]
+    );
+
+    let application_id;
+
+    if (application.rows.length === 0) {
+      application_id = "APP" + Date.now() + Math.floor(Math.random() * 1000);
+
+      await client.query(
+        `INSERT INTO applications (id, user_id, status, category) 
+         VALUES ($1, $2, 'pending', 'others')`,
+        [application_id, student_id]
+      );
+    } else {
+      application_id = application.rows[0].id;
+    }
+
+    // 2️⃣ Upload documents
+    for (let file of docs) {
+      let key = file.originalname.replace(/\.[^/.]+$/, "");
+
+      let document_type =
+        key.toLowerCase().includes("guardian") ? "guardian" : "student";
+
+      const existingDoc = await client.query(
+        `SELECT id FROM application_documents 
+         WHERE application_id=$1 AND document_key=$2`,
+        [application_id, key]
+      );
+
+      if (existingDoc.rows.length > 0) {
+        // 🔁 Update
+        await client.query(
+          `UPDATE application_documents 
+           SET document_file=$1, file_name=$2, file_size=$3, mime_type=$4,
+               status='pending', updated_at=NOW(), uploaded_by=$5
+           WHERE application_id=$6 AND document_key=$7`,
+          [
+            file.buffer,
+            file.originalname,
+            file.size,
+            file.mimetype,
+            employee_id,
+            application_id,
+            key,
+          ]
+        );
+      } else {
+        // ➕ Insert
+        await client.query(
+          `INSERT INTO application_documents
+           (application_id, user_id, uploaded_by, document_type, document_key,
+            document_file, file_name, file_size, mime_type, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')`,
+          [
+            application_id,
+            student_id,
+            employee_id,
+            document_type,
+            key,
+            file.buffer,
+            file.originalname,
+            file.size,
+            file.mimetype,
+          ]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "Documents uploaded by employee successfully",
+      application_id,
+    });
+
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("❌ Employee upload error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
+});
+
     if (appRes.rowCount === 0) {
       return res.status(404).json({ success: false });
     }
@@ -305,7 +412,7 @@ if (status === "approved") {
 }
 
     // 6️⃣ Notification
-    await createNotification(
+    await createNotification( 
       userId,
       "Payment Status Updated",
       `Your payment is ${status}`

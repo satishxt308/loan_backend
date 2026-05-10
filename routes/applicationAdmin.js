@@ -93,7 +93,9 @@ router.get("/applications/:appId/details", async (req, res) => {
 
 router.put("/applications/:appId/status", async (req, res) => {
   const { appId } = req.params;
-  const { status, reason } = req.body;
+
+  // ✅ FIX HERE
+  const { status, rejection_reason } = req.body;
 
   if (!["approved", "rejected", "pending"].includes(status)) {
     return res.status(400).json({ success: false, message: "Invalid status" });
@@ -115,7 +117,7 @@ router.put("/applications/:appId/status", async (req, res) => {
 
     const { user_id, old_status } = appRes.rows[0];
 
-    // Update application
+    // ✅ STORE rejection_reason properly
     await pool.query(`
       UPDATE applications
       SET 
@@ -124,16 +126,18 @@ router.put("/applications/:appId/status", async (req, res) => {
         admin_reason = $2,
         last_updated = NOW()
       WHERE id = $3
-    `, [status, reason || null, appId]);
+    `, [status, rejection_reason || null, appId]);
 
-    // 🔔 Notification
+    // 🔔 Notification (include reason if rejected)
     await pool.query(`
       INSERT INTO notifications (user_id, title, message, application_id)
       VALUES ($1, $2, $3, $4)
     `, [
       user_id,
       "Application Status Updated",
-      `Your application status changed from ${old_status} to ${status}`,
+      status === "rejected"
+        ? `Your application was rejected. Reason: ${rejection_reason}`
+        : `Your application status changed from ${old_status} to ${status}`,
       appId
     ]);
 

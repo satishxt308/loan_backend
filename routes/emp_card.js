@@ -4,9 +4,12 @@ const router = express.Router();
 const pool = require("../db/db");
 const multer = require("multer");
 
+const storage = multer.memoryStorage();
+
 const upload = multer({
+  storage,
   limits: {
-    fieldSize: 10 * 1024 * 1024, // 10 MB per field
+    fileSize: 10 * 1024 * 1024, // 10MB
   },
 });
 
@@ -69,16 +72,29 @@ router.get("/get/:user_id", async (req, res) => {
 
 router.post(
   "/submit-employee-documents",
-  upload.none(),
+
+  upload.fields([
+    { name: "aadhaar_card", maxCount: 1 },
+    { name: "pan_card", maxCount: 1 },
+    { name: "employee_photo", maxCount: 1 },
+  ]),
+
   async (req, res) => {
     try {
-      console.log("REQ BODY KEYS:", Object.keys(req.body)); // debug
+
+      console.log("REQ BODY:", req.body);
+      console.log("REQ FILES:", req.files);
 
       const { user_id } = req.body;
 
       if (!user_id) {
-        return res.json({ success: false, message: "User ID is required" });
+        return res.json({
+          success: false,
+          message: "User ID is required",
+        });
       }
+
+      const files = req.files || {};
 
       const documents = [
         "aadhaar_card",
@@ -86,49 +102,63 @@ router.post(
         "employee_photo",
       ];
 
-    for (const docType of documents) {
-  const base64Data = req.body[docType];
-  const existingId = req.body[`${docType}_id`];
+      for (const docType of documents) {
 
-  // 🔹 Case 1: New upload (base64)
-  if (base64Data) {
-    const check = await pool.query(
-      `SELECT id FROM emp_documents
-       WHERE user_id = $1 AND document_type = $2`,
-      [user_id, docType]
-    );
+        const fileArray = files[docType];
 
-    if (check.rows.length > 0) {
-      await pool.query(
-        `UPDATE emp_documents
-         SET base64_data = $1, updated_at = NOW()
-         WHERE user_id = $2 AND document_type = $3`,
-        [base64Data, user_id, docType]
-      );
-    } else {
-      await pool.query(
-        `INSERT INTO emp_documents (user_id, document_type, base64_data)
-         VALUES ($1, $2, $3)`,
-        [user_id, docType, base64Data]
-      );
-    }
-  }
+        // no new upload
+        if (!fileArray || fileArray.length === 0) {
 
-  // 🔹 Case 2: Existing doc (ID only → do nothing)
-  else if (existingId) {
-    console.log(`${docType} unchanged (ID: ${existingId})`);
-    continue;
-  }
+          const existingId = req.body[`${docType}_id`];
 
-  // 🔴 Case 3: Missing both → error
-  else {
-    return res.json({
-      success: false,
-      message: `${docType} is required`,
-    });
-  }
-}
+          if (existingId) {
+            console.log(`${docType} unchanged`);
+          }
 
+          continue;
+        }
+
+        const file = fileArray[0];
+
+        console.log("Saving:", docType);
+
+        const base64Data = file.buffer.toString("base64");
+
+        const check = await pool.query(
+          `SELECT id FROM emp_documents
+           WHERE user_id = $1
+           AND document_type = $2`,
+          [user_id, docType]
+        );
+
+        if (check.rows.length > 0) {
+
+          // UPDATE
+          await pool.query(
+            `UPDATE emp_documents
+             SET base64_data = $1,
+                 status = 'pending',
+                 reason = NULL,
+                 updated_at = NOW()
+             WHERE user_id = $2
+             AND document_type = $3`,
+            [base64Data, user_id, docType]
+          );
+
+        } else {
+
+          // INSERT
+          await pool.query(
+            `INSERT INTO emp_documents
+            (user_id, document_type, base64_data)
+             VALUES ($1, $2, $3)`,
+            [user_id, docType, base64Data]
+          );
+
+        }
+      }
+
+      // Update user
       await pool.query(
         `UPDATE users
          SET emp_card = true,
@@ -144,10 +174,13 @@ router.post(
       });
 
     } catch (err) {
+
       console.log("Submit employee documents error:", err);
+
       return res.status(500).json({
         success: false,
         message: "Server error",
+        error: err.message,
       });
     }
   }

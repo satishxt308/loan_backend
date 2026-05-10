@@ -10,30 +10,33 @@ const bcrypt = require("bcryptjs");
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Import professional email templates
+const emailTemplates = require("../utils/emailTemplates");
+
 // ===========================
-// SEND OTP VIA EMAIL
+// SEND OTP VIA EMAIL (WITH TEMPLATE)
 // ===========================
 router.post("/send-otp", async (req, res) => {
-  const { email } = req.body; // ✅ ADD THIS
+  const { email } = req.body;
 
   if (!email) {
     return res.status(400).json({ success: false, message: "Email is required" });
   }
 
-  const emailNormalized = email.trim().toLowerCase(); // ✅ AFTER getting email
+  const emailNormalized = email.trim().toLowerCase();
 
   try {
     const existingUser = await pool.query(
-  `SELECT id FROM users WHERE LOWER(email) = $1`,
-  [emailNormalized]
-);
+      `SELECT id FROM users WHERE LOWER(email) = $1`,
+      [emailNormalized]
+    );
 
- if (existingUser.rows.length > 0) {
-  return res.status(400).json({
-    success: false,
-    message: "Email already registered. Please login."
-  });
-}
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered. Please login."
+      });
+    }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -45,34 +48,32 @@ router.post("/send-otp", async (req, res) => {
       lastSent: Date.now(),
       verified: false
     };
-const emailResponse = await resend.emails.send({
-  from: process.env.FROM_EMAIL,
-  to: emailNormalized,
-  subject: "OTP",
-  html: `<h2>${otp}</h2>`
-});
 
-console.log("SEND OTP RESPONSE:", emailResponse);
+    // ✅ Send professional email template
+    const emailResponse = await resend.emails.send({
+      from: process.env.FROM_EMAIL,
+      to: emailNormalized,
+      subject: "🎓 Verify Your Email - PSWB Registration",
+      html: emailTemplates.getWelcomeEmailTemplate(emailNormalized, otp)
+    });
 
-// 🔥 ADD THIS CHECK
-if (emailResponse?.error) {
-  console.error("EMAIL SEND FAILED:", emailResponse.error);
+    console.log("SEND OTP RESPONSE:", emailResponse);
 
-  return res.status(500).json({
-    success: false,
-    message: "Failed to send OTP email"
-  });
-}
-
-console.log("SEND OTP RESPONSE:", emailResponse);
+    if (emailResponse?.error) {
+      console.error("EMAIL SEND FAILED:", emailResponse.error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send OTP email"
+      });
+    }
 
     res.json({
       success: true,
-      message: "OTP sent"
+      message: "OTP sent successfully"
     });
 
   } catch (err) {
-    console.error("SEND OTP ERROR:", err); // 🔥 ADD THIS
+    console.error("SEND OTP ERROR:", err);
     res.status(500).json({ success: false, message: "Error sending OTP" });
   }
 });
@@ -81,7 +82,7 @@ console.log("SEND OTP RESPONSE:", emailResponse);
 // VERIFY OTP
 // ===========================
 router.post("/verify-otp", async (req, res) => {
-  const { email, otp } = req.body; // ✅ ADD THIS
+  const { email, otp } = req.body;
 
   const emailNormalized = email.trim().toLowerCase();
   const record = global.otpStore?.[emailNormalized];
@@ -98,11 +99,14 @@ router.post("/verify-otp", async (req, res) => {
     return res.json({ success: false, verified: false, message: "Invalid OTP" });
   }
 
-  global.otpStore[emailNormalized].verified = true; // ✅ FIX
+  global.otpStore[emailNormalized].verified = true;
 
   res.json({ success: true, verified: true });
 });
 
+// ===========================
+// CHECK EMAIL EXISTS
+// ===========================
 router.get("/check-email/:email", async (req, res) => {
   try {
     const { email } = req.params;
@@ -128,8 +132,8 @@ router.post("/complete-registration", async (req, res) => {
   try {
     const { fullName, dateOfBirth, gender, role, phoneNumber, email, password } = req.body;
 
-   const emailNormalized = email.trim().toLowerCase();
-const record = global.otpStore?.[emailNormalized];
+    const emailNormalized = email.trim().toLowerCase();
+    const record = global.otpStore?.[emailNormalized];
 
     if (!record || !record.verified) {
       return res.status(400).json({
@@ -138,19 +142,16 @@ const record = global.otpStore?.[emailNormalized];
       });
     }
 
-    // 🔐 hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ✅ insert user ONLY NOW
-const result = await pool.query(
-  `INSERT INTO users 
-  (full_name, date_of_birth, gender, role, phone_number, email, password, otp_verified)
-  VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-  RETURNING id, full_name, email, role`,
-  [fullName, dateOfBirth, gender, role, phoneNumber, emailNormalized, hashedPassword, true]
-);
+    const result = await pool.query(
+      `INSERT INTO users 
+      (full_name, date_of_birth, gender, role, phone_number, email, password, otp_verified)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      RETURNING id, full_name, email, role`,
+      [fullName, dateOfBirth, gender, role, phoneNumber, emailNormalized, hashedPassword, true]
+    );
 
-    // ✅ cleanup OTP
     delete global.otpStore[emailNormalized];
 
     res.json({
@@ -159,6 +160,7 @@ const result = await pool.query(
     });
 
   } catch (err) {
+    console.error("Registration Error:", err);
     res.status(500).json({ success: false, message: "Registration failed" });
   }
 });
@@ -187,7 +189,6 @@ router.post("/employee/add-student", async (req, res) => {
 
     const emailNormalized = email.trim().toLowerCase();
 
-    // ✅ Check OTP
     const record = global.otpStore?.[emailNormalized];
 
     if (!record || !record.verified) {
@@ -197,10 +198,8 @@ router.post("/employee/add-student", async (req, res) => {
       });
     }
 
-    // 🔐 hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ✅ insert student with employee link
     const result = await pool.query(
       `INSERT INTO users 
       (full_name, date_of_birth, gender, role, phone_number, email, password, otp_verified, emp_stu_id)
@@ -215,11 +214,10 @@ router.post("/employee/add-student", async (req, res) => {
         emailNormalized,
         hashedPassword,
         true,
-        emp_id // 🔥 HERE LINK STORED
+        emp_id
       ]
     );
 
-    // cleanup OTP
     delete global.otpStore[emailNormalized];
 
     res.json({
@@ -236,6 +234,9 @@ router.post("/employee/add-student", async (req, res) => {
   }
 });
 
+// ===========================
+// RESEND OTP
+// ===========================
 router.post("/resend-otp", async (req, res) => {
   const { email } = req.body;
 
@@ -249,10 +250,9 @@ router.post("/resend-otp", async (req, res) => {
   try {
     global.otpStore = global.otpStore || {};
 
-   const emailNormalized = email.trim().toLowerCase();
-const existing = global.otpStore[emailNormalized];
+    const emailNormalized = email.trim().toLowerCase();
+    const existing = global.otpStore[emailNormalized];
 
-    // ❌ No previous OTP
     if (!existing) {
       return res.status(400).json({
         success: false,
@@ -260,7 +260,6 @@ const existing = global.otpStore[emailNormalized];
       });
     }
 
-    // ⏱️ Cooldown check (1 min)
     const now = Date.now();
     const lastSent = existing.lastSent || 0;
 
@@ -272,10 +271,8 @@ const existing = global.otpStore[emailNormalized];
       });
     }
 
-    // 🔁 Generate new OTP
     const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // ✅ Update store
     global.otpStore[emailNormalized] = {
       otp: newOtp,
       expiry: Date.now() + 5 * 60 * 1000,
@@ -283,24 +280,23 @@ const existing = global.otpStore[emailNormalized];
       verified: false,
     };
 
-    // 📩 Send email
-   const emailResponse = await resend.emails.send({
-  from: process.env.FROM_EMAIL,
-  to: emailNormalized,
-  subject: "Your New OTP",
-  html: `<h2>${newOtp}</h2>`,
-});
+    // ✅ Send OTP email with template
+    const emailResponse = await resend.emails.send({
+      from: process.env.FROM_EMAIL,
+      to: emailNormalized,
+      subject: "🔄 New OTP Request - PSWB",
+      html: emailTemplates.getOtpTemplate(newOtp, emailNormalized)
+    });
 
-console.log("RESEND RESPONSE:", emailResponse);
+    console.log("RESEND RESPONSE:", emailResponse);
 
-if (emailResponse?.error) {
-  console.error("RESEND FAILED:", emailResponse.error);
-
-  return res.status(500).json({
-    success: false,
-    message: "Failed to resend OTP",
-  });
-}
+    if (emailResponse?.error) {
+      console.error("RESEND FAILED:", emailResponse.error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to resend OTP",
+      });
+    }
 
     res.json({
       success: true,
@@ -316,12 +312,13 @@ if (emailResponse?.error) {
   }
 });
 
-// Update the toggle-card-status route to handle conditional logic
+// ===========================
+// TOGGLE CARD STATUS
+// ===========================
 router.post("/toggle-card-status", async (req, res) => {
   try {
     const { user_id, field } = req.body;
 
-    // Check user current status for conditional logic
     const userCheck = await pool.query(
       `SELECT stu_card, reg_pay FROM users WHERE id = $1`,
       [user_id]
@@ -336,7 +333,6 @@ router.post("/toggle-card-status", async (req, res) => {
 
     const user = userCheck.rows[0];
 
-    // Conditional logic
     if (field === "reg_pay" && !user.stu_card) {
       return res.status(400).json({
         success: false,
@@ -382,7 +378,9 @@ router.post("/toggle-card-status", async (req, res) => {
   }
 });
 
-// Delete user
+// ===========================
+// DELETE USER
+// ===========================
 router.delete("/delete/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -414,7 +412,9 @@ router.delete("/delete/:id", async (req, res) => {
   }
 });
 
-// Update all statuses at once (for "All OK" button)
+// ===========================
+// UPDATE ALL STATUSES
+// ===========================
 router.put("/update-all-status", async (req, res) => {
   try {
     const { user_id, stu_card, reg_pay, stu_card_verified } = req.body;
@@ -452,7 +452,9 @@ router.put("/update-all-status", async (req, res) => {
   }
 });
 
-// Update GET all-users route to include is_active
+// ===========================
+// GET ALL USERS
+// ===========================
 router.get("/all-users", async (req, res) => {
   try {
     const result = await pool.query(`
@@ -488,8 +490,11 @@ router.get("/all-users", async (req, res) => {
       message: "Server error while fetching users"
     });
   }
-}); 
+});
 
+// ===========================
+// TOGGLE ACTIVE STATUS
+// ===========================
 router.put("/toggle-active/:id", async (req, res) => {
   const { id } = req.params;
 
@@ -517,8 +522,8 @@ router.put("/toggle-active/:id", async (req, res) => {
     res.json({
       success: true,
       message: newStatus
-        ? "User unblocked successfully"
-        : "User blocked successfully",
+        ? "User activated successfully"
+        : "User deactivated successfully",
       is_active: newStatus,
     });
   } catch (error) {
@@ -530,6 +535,9 @@ router.put("/toggle-active/:id", async (req, res) => {
   }
 });
 
+// ===========================
+// GET EMPLOYEE STUDENTS
+// ===========================
 router.get("/employee/students/:emp_id", async (req, res) => {
   try {
     const { emp_id } = req.params;
@@ -540,7 +548,9 @@ router.get("/employee/students/:emp_id", async (req, res) => {
         full_name, 
         email, 
         phone_number,
-        is_active,   -- ✅ ADD THIS
+        stu_card,
+        student_id,
+        is_active,
         created_at 
        FROM users
        WHERE emp_stu_id = $1
@@ -562,7 +572,9 @@ router.get("/employee/students/:emp_id", async (req, res) => {
   }
 });
 
+// ===========================
 // UPDATE USER ROLE
+// ===========================
 router.put("/update-role/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -586,6 +598,9 @@ router.put("/update-role/:id", async (req, res) => {
   }
 });
 
+// ===========================
+// GET STUDENT BY ID
+// ===========================
 router.get("/student/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -623,8 +638,9 @@ router.get("/student/:id", async (req, res) => {
   }
 });
 
-
-
+// ===========================
+// GET USER BASIC INFO
+// ===========================
 router.get("/user/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -653,7 +669,9 @@ router.get("/user/:id", async (req, res) => {
   }
 });
 
-// ✅ GET USER (ALL DATA - for employee + student)
+// ===========================
+// GET USER DATA
+// ===========================
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -665,6 +683,7 @@ router.get("/:id", async (req, res) => {
         stu_card,
         stu_card_verified,
         emp_card,
+        wallet_balance,
         emp_card_verified
        FROM users
        WHERE id = $1`,
@@ -687,7 +706,7 @@ router.get("/:id", async (req, res) => {
 });
 
 // ===========================
-// GET USER PROFILE (BY ID)
+// GET USER PROFILE
 // ===========================
 router.get("/profile/:id", async (req, res) => {
   try {
@@ -724,7 +743,6 @@ router.get("/profile/:id", async (req, res) => {
 
     const userData = user.rows[0];
 
-    // Convert profile_image buffer to base64
     if (userData.profile_image) {
       userData.profile_image = userData.profile_image.toString("base64");
     }
@@ -742,6 +760,9 @@ router.get("/profile/:id", async (req, res) => {
   }
 });
 
+// ===========================
+// UPDATE STATUS
+// ===========================
 router.patch("/update-status/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -767,7 +788,7 @@ router.patch("/update-status/:id", async (req, res) => {
 });
 
 // ===========================
-// UPDATE USER PROFILE - FIXED
+// UPDATE USER PROFILE
 // ===========================
 router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
   try {
@@ -829,6 +850,9 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
   }
 });
 
+// ===========================
+// UPDATE STUDENT CARD STATUS
+// ===========================
 router.put("/update-stu-card/:id", async (req, res) => {
   try {
     const { id } = req.params;

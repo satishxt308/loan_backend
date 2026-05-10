@@ -3,7 +3,6 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/db");
 
-// Get notifications by user ID
 router.get("/:userId", async (req, res) => {
   const { userId } = req.params;
 
@@ -15,9 +14,7 @@ router.get("/:userId", async (req, res) => {
         title,
         message,
         is_read,
-        created_at,
-        application_id,
-        document_id
+        created_at
       FROM notifications
       WHERE user_id = $1
       ORDER BY created_at DESC
@@ -31,12 +28,14 @@ router.get("/:userId", async (req, res) => {
     });
   } catch (error) {
     console.error("Fetch notifications error:", error);
+
     res.status(500).json({
       success: false,
       message: "Failed to fetch notifications",
     });
   }
 });
+
 
 // PUT /api/notifications/read-all/:userId
 router.put("/read-all/:userId", async (req, res) => {
