@@ -59,4 +59,8 @@ app.use("/api", applicationRoutes);
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📡 Accessible locally at http://localhost:${PORT}`);
+  console.log(`🌐 Accessible on network at http://10.164.109.99:${PORT}`);
+});

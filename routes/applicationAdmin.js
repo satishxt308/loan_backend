@@ -23,11 +23,7 @@ router.get("/users", async (req, res) => {
 
   COUNT(DISTINCT CASE WHEN a.status = 'pending' THEN a.id END) AS pending_apps,
 
-  EXISTS (
-    SELECT 1 
-    FROM registration_payments rp
-    WHERE rp.user_id = u.id AND rp.status = 'success'
-  ) AS reg_pay
+  u.reg_pay AS reg_pay
 
 FROM users u
 LEFT JOIN applications a ON a.user_id = u.id
@@ -225,10 +221,7 @@ router.put("/users/:userId/verify-student-card", async (req, res) => {
       `SELECT 
         u.stu_card_verified,
         u.full_name,
-        EXISTS (
-          SELECT 1 FROM registration_payments rp
-          WHERE rp.user_id = u.id AND rp.status = 'success'
-        ) AS has_reg_payment,
+        u.reg_pay AS has_reg_payment,
         COALESCE(
           (SELECT COUNT(*) FROM applications a WHERE a.user_id = u.id AND a.status != 'approved'),
           0
@@ -302,14 +295,7 @@ router.get("/users/:userId/registration-payments", async (req, res) => {
 
   try {
     const userCheck = await pool.query(
-      `SELECT 
-        EXISTS (
-          SELECT 1 
-          FROM registration_payments rp
-          WHERE rp.user_id = u.id AND rp.status = 'success'
-        ) AS reg_pay
-      FROM users u
-      WHERE u.id = $1`,
+      `SELECT reg_pay FROM users WHERE id = $1`,
       [userId]
     );
 
@@ -319,28 +305,28 @@ router.get("/users/:userId/registration-payments", async (req, res) => {
 
     const result = await pool.query(`
       SELECT 
-        rp.id,
-        rp.amount,
-        rp.currency,
-        rp.status,
-        rp.method,
-        rp.utr_number,
-        rp.raw_ocr_text,
-        rp.created_at,
+        p.id,
+        2500 AS amount,
+        'INR' AS currency,
+        p.status,
+        p.via_payment AS method,
+        p.utr AS utr_number,
+        NULL AS raw_ocr_text,
+        p.created_at,
 
         -- BYTEA → Base64
         CASE 
-          WHEN rp.payment_image IS NOT NULL 
-          THEN encode(rp.payment_image, 'base64')
+          WHEN p.payment_image IS NOT NULL 
+          THEN encode(p.payment_image, 'base64')
           ELSE NULL
         END AS payment_image_base64,
 
         u.full_name,
         u.email
-      FROM registration_payments rp
-      JOIN users u ON u.id = rp.user_id
-      WHERE rp.user_id = $1
-      ORDER BY rp.created_at DESC
+      FROM payments p
+      JOIN users u ON u.id = p.user_id
+      WHERE p.user_id = $1
+      ORDER BY p.created_at DESC
     `, [userId]);
 
     res.json({
@@ -368,10 +354,10 @@ router.put("/registration-payments/:paymentId/review", async (req, res) => {
 
     // Get payment details
     const paymentResult = await pool.query(`
-      SELECT rp.*, u.id as user_id, u.email
-      FROM registration_payments rp
-      JOIN users u ON u.id = rp.user_id
-      WHERE rp.id = $1
+      SELECT p.*, u.id as user_id, u.email
+      FROM payments p
+      JOIN users u ON u.id = p.user_id
+      WHERE p.id = $1
     `, [paymentId]);
 
     if (paymentResult.rows.length === 0) {
@@ -385,10 +371,18 @@ router.put("/registration-payments/:paymentId/review", async (req, res) => {
     if (action === 'accept') {
       // Update payment status
       await pool.query(
-        `UPDATE registration_payments 
-         SET status = 'success', updated_at = NOW()
+        `UPDATE payments 
+         SET status = 'approved', updated_at = NOW()
          WHERE id = $1`,
         [paymentId]
+      );
+
+      // Set user's reg_pay = true
+      await pool.query(
+        `UPDATE users 
+         SET reg_pay = true, updated_at = NOW() 
+         WHERE id = $1`,
+        [userId]
       );
 
       await pool.query("COMMIT");
@@ -401,10 +395,18 @@ router.put("/registration-payments/:paymentId/review", async (req, res) => {
     } else if (action === 'reject') {
       // Update payment status
       await pool.query(
-        `UPDATE registration_payments 
-         SET status = 'failed', updated_at = NOW()
+        `UPDATE payments 
+         SET status = 'rejected', updated_at = NOW()
          WHERE id = $1`,
         [paymentId]
+      );
+
+      // Set user's reg_pay = false
+      await pool.query(
+        `UPDATE users 
+         SET reg_pay = false, updated_at = NOW() 
+         WHERE id = $1`,
+        [userId]
       );
 
       // Create notification
@@ -513,10 +515,7 @@ router.get("/users/:userId/student-card-info", async (req, res) => {
         u.student_id,
         u.aadhaar_number,
         u.full_address,
-        EXISTS (
-          SELECT 1 FROM registration_payments rp
-          WHERE rp.user_id = u.id AND rp.status = 'success'
-        ) AS has_reg_payment,
+        u.reg_pay AS has_reg_payment,
         COALESCE(
           (SELECT json_agg(DISTINCT a.*) 
            FROM applications a 

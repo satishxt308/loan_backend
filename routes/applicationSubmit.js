@@ -3,16 +3,26 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 const db = require("../db/db");
+const { v4: uuidv4 } = require("uuid");
 
 const upload = multer({
   storage: multer.memoryStorage(), // ✅ REQUIRED
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB
   },
+  fileFilter: (req, file, cb) => {
+    // strict file filter to prevent malicious file uploads
+    const allowedMimeTypes = ["image/jpeg", "image/png", "image/jpg", "application/pdf"];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only JPEG, PNG, and PDF are allowed."));
+    }
+  }
 });
 
 // Generate APP ID
-const generateAppId = () => "APP" + Date.now() + Math.floor(Math.random() * 1000);
+const generateAppId = () => "APP-" + uuidv4().slice(0, 8).toUpperCase();
 
 // Helper function to truncate long string fields
 const truncateString = (str, max) => {
@@ -228,6 +238,64 @@ let parsedFormData = {};
             ]
           );
         }
+      }
+    }
+
+    // Sync to guardians table
+    if (formFields.guardian_name) {
+      // Get student's emp_stu_id
+      const studentUser = await client.query(
+        "SELECT emp_stu_id FROM users WHERE id = $1",
+        [parseInt(user_id)]
+      );
+      const employeeId = studentUser.rows.length > 0 ? studentUser.rows[0].emp_stu_id : null;
+
+      const existingGuard = await client.query(
+        "SELECT id FROM guardians WHERE student_id = $1",
+        [parseInt(user_id)]
+      );
+
+      const clean = (val) => (val ? val.replace(/-/g, "") : null);
+
+      if (existingGuard.rows.length > 0) {
+        await client.query(
+          `UPDATE guardians SET
+            name = $2,
+            phone = $3,
+            relation = $4,
+            aadhaar_number = $5,
+            pan_number = $6,
+            address = $7,
+            employee_id = COALESCE(employee_id, $8),
+            updated_at = NOW()
+          WHERE student_id = $1`,
+          [
+            parseInt(user_id),
+            formFields.guardian_name,
+            formFields.guardian_number,
+            formFields.guardian_relation,
+            clean(formFields.guardian_aadhaar),
+            formFields.guardian_pan,
+            formFields.full_address,
+            employeeId
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO guardians (
+            student_id, name, phone, relation, aadhaar_number, pan_number, address, employee_id, status
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
+          [
+            parseInt(user_id),
+            formFields.guardian_name,
+            formFields.guardian_number,
+            formFields.guardian_relation,
+            clean(formFields.guardian_aadhaar),
+            formFields.guardian_pan,
+            formFields.full_address,
+            employeeId
+          ]
+        );
       }
     }
 

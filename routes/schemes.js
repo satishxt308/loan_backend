@@ -1,7 +1,22 @@
-// backend/routes/schemes.js
 const express = require("express");
 const router = express.Router();
 const pool = require("../db/db");
+const multer = require("multer");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = ["image/jpeg", "image/png", "image/jpg", "application/pdf"];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only JPEG, PNG, and PDF are allowed."));
+    }
+  }
+});
 
 // Helper function to organize features by type
 const organizeFeaturesByType = (features) => {
@@ -93,6 +108,9 @@ router.get('/schemas', async (req, res) => {
 router.get('/schemas/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        if (!id || id === 'undefined' || isNaN(parseInt(id))) {
+            return res.status(400).json({ error: 'Invalid schema ID' });
+        }
         const result = await pool.query(`
             SELECT 
                 s.*,
@@ -154,6 +172,9 @@ router.post('/schemas/add', async (req, res) => {
             rating,
             enrolled_count,
             iconImage,
+            interest_rate,
+            tenure_months,
+            eligibility,
             features,
             coverage_details,
             key_benefits,
@@ -183,9 +204,10 @@ router.post('/schemas/add', async (req, res) => {
             INSERT INTO schemes (
     schema_name, schema_type, short_description, 
     amount, frequency, full_description, 
-    rating, enrolled_count, icon_image
+    rating, enrolled_count, icon_image,
+    interest_rate, tenure_months, eligibility
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 RETURNING id
         `, [
   schema_name,
@@ -196,7 +218,10 @@ RETURNING id
   full_description || '',
   parseFloat(rating) || 4.8,
   parseInt(enrolled_count) || 2500,
-  iconBuffer
+  iconBuffer,
+  parseFloat(interest_rate) || 0.00,
+  parseInt(tenure_months) || 12,
+  eligibility || ''
 ]);
         
         schemaId = schemeResult.rows[0].id; // Assign to the outer variable
@@ -329,11 +354,14 @@ RETURNING id
 
 // PUT update schema - FIXED variable name
 router.put('/schemas/edit/:id', async (req, res) => {
+    const { id } = req.params;
+    if (!id || id === 'undefined' || isNaN(parseInt(id))) {
+        return res.status(400).json({ error: 'Invalid schema ID' });
+    }
     const client = await pool.connect();
     
     try {
         await client.query('BEGIN');
-        const { id } = req.params;
         
         // Check if schema exists
         const checkResult = await client.query(
@@ -356,6 +384,9 @@ router.put('/schemas/edit/:id', async (req, res) => {
             rating,
             enrolled_count,
             iconImage,
+            interest_rate,
+            tenure_months,
+            eligibility,
             features,
             coverage_details,
             key_benefits,
@@ -385,8 +416,11 @@ if (iconImage) {
     rating = $7,
     enrolled_count = $8,
     icon_image = COALESCE($9, icon_image),
+    interest_rate = $10,
+    tenure_months = $11,
+    eligibility = $12,
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $10
+WHERE id = $13
         `,[
   schema_name,
   schema_type,
@@ -397,6 +431,9 @@ WHERE id = $10
   parseFloat(rating) || 4.8,
   parseInt(enrolled_count) || 2500,
   iconBuffer,
+  parseFloat(interest_rate) || 0.00,
+  parseInt(tenure_months) || 12,
+  eligibility || '',
   id
 ]);
         
@@ -523,6 +560,9 @@ WHERE id = $10
 router.delete("/schema-types/delete/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    if (!id || id === 'undefined' || isNaN(parseInt(id))) {
+      return res.status(400).json({ error: "Invalid schema type ID" });
+    }
 
     // Get type name
     const typeRes = await pool.query(
@@ -567,9 +607,12 @@ router.delete("/schema-types/delete/:id", async (req, res) => {
 
 
 router.delete('/schemas/delete/:id', async (req, res) => {
+    const { id } = req.params;
+    if (!id || id === 'undefined' || isNaN(parseInt(id))) {
+        return res.status(400).json({ success: false, error: 'Invalid schema ID' });
+    }
     const client = await pool.connect();
     try {
-        const { id } = req.params;
 
         await client.query('BEGIN');
 
@@ -668,6 +711,384 @@ res.status(500).json({
   }
 }
 
+});
+
+// Initialize loan_applications and loan_emis tables automatically
+const initLoanApplicationsTable = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS loan_applications (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                scheme_name VARCHAR(255) NOT NULL,
+                requested_amount NUMERIC NOT NULL,
+                tenure_months INTEGER NOT NULL,
+                monthly_emi NUMERIC NOT NULL,
+                bank_name VARCHAR(100) NOT NULL,
+                account_number VARCHAR(50) NOT NULL,
+                ifsc_code VARCHAR(20) NOT NULL,
+                account_holder VARCHAR(150) NOT NULL,
+                status VARCHAR(50) DEFAULT 'Pending',
+                document_name VARCHAR(255),
+                document_file TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        // Safely add columns if table already exists
+        await pool.query(`
+            ALTER TABLE loan_applications ADD COLUMN IF NOT EXISTS document_name VARCHAR(255);
+            ALTER TABLE loan_applications ADD COLUMN IF NOT EXISTS document_file TEXT;
+        `);
+        
+        // Create loan_emis table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS loan_emis (
+                id SERIAL PRIMARY KEY,
+                loan_application_id INTEGER NOT NULL REFERENCES loan_applications(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                emi_number INTEGER NOT NULL,
+                due_date DATE NOT NULL,
+                amount NUMERIC NOT NULL,
+                status VARCHAR(50) DEFAULT 'Pending',
+                paid_date TIMESTAMP,
+                transaction_id VARCHAR(100),
+                payment_method VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        console.log("✓ loan_applications and loan_emis tables are verified/created");
+
+        // Add approved_at column to track when loan was approved (used for correct EMI start date)
+        await pool.query(`
+            ALTER TABLE loan_applications ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
+        `);
+
+        // Alter payments table to add emi_id and loan_id columns if they don't exist
+        await pool.query(`
+            ALTER TABLE payments ADD COLUMN IF NOT EXISTS emi_id INTEGER REFERENCES loan_emis(id) ON DELETE SET NULL;
+            ALTER TABLE payments ADD COLUMN IF NOT EXISTS loan_id INTEGER REFERENCES loan_applications(id) ON DELETE SET NULL;
+        `);
+        console.log("✓ payments table columns are updated");
+    } catch (err) {
+        console.error("Error creating loan database tables:", err.message);
+    }
+};
+initLoanApplicationsTable();
+
+// POST apply for a scheme/loan
+router.post('/apply', upload.single('document'), async (req, res) => {
+    try {
+        const { 
+            user_id, 
+            scheme_name, 
+            requested_amount, 
+            tenure_months, 
+            monthly_emi, 
+            bank_name, 
+            account_number, 
+            ifsc_code, 
+            account_holder,
+            document_name
+        } = req.body;
+
+        if (!user_id || !scheme_name || !requested_amount || !tenure_months || !monthly_emi) {
+            return res.status(400).json({ success: false, error: 'Required fields missing' });
+        }
+
+        let db_document_file = null;
+        let db_document_name = document_name || null;
+
+        if (req.file) {
+            const base64Str = req.file.buffer.toString("base64");
+            db_document_file = `data:${req.file.mimetype};base64,` + base64Str;
+            if (!db_document_name) {
+                db_document_name = req.file.originalname;
+            }
+        }
+
+        const result = await pool.query(`
+            INSERT INTO loan_applications (
+                user_id, 
+                scheme_name, 
+                requested_amount, 
+                tenure_months, 
+                monthly_emi, 
+                bank_name, 
+                account_number, 
+                ifsc_code, 
+                account_holder,
+                document_name,
+                document_file
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *
+        `, [
+            parseInt(user_id), 
+            scheme_name, 
+            parseFloat(requested_amount), 
+            parseInt(tenure_months), 
+            parseFloat(monthly_emi), 
+            bank_name, 
+            account_number, 
+            ifsc_code, 
+            account_holder,
+            db_document_name,
+            db_document_file
+        ]);
+
+        res.json({ 
+            success: true, 
+            message: 'Loan application submitted successfully', 
+            application: result.rows[0] 
+        });
+    } catch (error) {
+        console.error("Error submitting loan application:", error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// GET all loan applications for admin
+router.get('/applications', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT la.*, u.full_name, u.email, u.phone_number
+            FROM loan_applications la
+            JOIN users u ON la.user_id = u.id
+            ORDER BY la.created_at DESC
+        `);
+        res.json({ success: true, data: result.rows });
+    } catch (error) {
+        console.error("Error fetching loan applications:", error);
+        res.status(500).json({ success: false, error: 'Failed to fetch loan applications' });
+    }
+});
+
+// PUT update status of loan application
+router.put('/applications/:id/status', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        if (!id || id === 'undefined' || isNaN(parseInt(id))) {
+            return res.status(400).json({ success: false, error: 'Invalid application ID' });
+        }
+
+        // When loan is approved/disbursed, record approved_at timestamp
+        // This is the reference date for EMI schedule generation
+        const isApproving = ['approved', 'Approved', 'disbursed', 'Disbursed'].includes(status);
+
+        const result = await pool.query(
+            isApproving
+                ? `UPDATE loan_applications SET status = $1, approved_at = NOW() WHERE id = $2 RETURNING *`
+                : `UPDATE loan_applications SET status = $1 WHERE id = $2 RETURNING *`,
+            [status, id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Application not found' });
+        }
+
+        // If approving, delete any stale/incorrect EMIs that may have been generated before approval
+        if (isApproving) {
+            await pool.query(`DELETE FROM loan_emis WHERE loan_application_id = $1`, [id]);
+        }
+
+        res.json({ success: true, message: 'Status updated successfully', data: result.rows[0] });
+    } catch (error) {
+        console.error("Error updating status:", error);
+        res.status(500).json({ success: false, error: 'Failed to update status' });
+    }
+});
+
+// GET ALL loan applications for a user (full history)
+router.get('/applications/user/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined' || isNaN(parseInt(userId))) {
+            return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        }
+        const result = await pool.query(`
+            SELECT * FROM loan_applications
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+        `, [parseInt(userId)]);
+
+        res.json({ success: true, applications: result.rows });
+    } catch (error) {
+        console.error("Error fetching all user loan applications:", error);
+        res.status(500).json({ success: false, error: 'Failed to fetch loan applications' });
+    }
+});
+
+// GET a user's most recent loan application status
+router.get('/application/user/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined' || isNaN(parseInt(userId))) {
+            return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        }
+        const result = await pool.query(`
+            SELECT * FROM loan_applications
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+        `, [parseInt(userId)]);
+        
+        if (result.rows.length === 0) {
+            return res.json({ success: true, hasApplication: false });
+        }
+        
+        res.json({ success: true, hasApplication: true, application: result.rows[0] });
+    } catch (error) {
+        console.error("Error fetching user loan application:", error);
+        res.status(500).json({ success: false, error: 'Failed to fetch user loan application' });
+    }
+});
+
+// GET repayment schedule for an active loan
+router.get('/repayment/schedule/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined' || isNaN(parseInt(userId))) {
+            return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        }
+        
+        // 1. Get the active (Approved/Disbursed) loan first. If none, get the most recent one.
+        const loanRes = await pool.query(`
+            SELECT * FROM loan_applications
+            WHERE user_id = $1
+            ORDER BY 
+                CASE 
+                    WHEN status IN ('Approved', 'Approved', 'disbursed', 'Disbursed') THEN 1 
+                    ELSE 2 
+                END ASC,
+                created_at DESC
+            LIMIT 1
+        `, [parseInt(userId)]);
+
+        if (loanRes.rows.length === 0) {
+            return res.json({ success: true, hasActiveLoan: false });
+        }
+
+        const loan = loanRes.rows[0];
+        const statusLower = loan.status?.toLowerCase();
+
+        // If the loan is not approved or disbursed, return that it's not active yet
+        if (statusLower !== 'approved' && statusLower !== 'disbursed') {
+            return res.json({ 
+                success: true, 
+                hasActiveLoan: true, 
+                isActive: false, 
+                application: loan 
+            });
+        }
+
+        // Update any overdue EMIs in the database before querying
+        await pool.query(`
+            UPDATE loan_emis
+            SET status = 'Overdue'
+            WHERE loan_application_id = $1 AND due_date < CURRENT_DATE AND status = 'Pending'
+        `, [loan.id]);
+
+        // 2. Query EMIs for this loan application
+        const emiRes = await pool.query(`
+            SELECT * FROM loan_emis
+            WHERE loan_application_id = $1
+            ORDER BY emi_number ASC
+        `, [loan.id]);
+
+        let emis = emiRes.rows;
+
+        // 3. If no EMIs exist, generate them from the APPROVAL date (not creation date)
+        if (emis.length === 0) {
+            const tenure = parseInt(loan.tenure_months) || 24;
+            const emiAmount = parseFloat(loan.monthly_emi) || 12500;
+
+            // CRITICAL FIX: Use approved_at as the EMI start reference.
+            // If approved_at is not set (older records), fall back to today to avoid past dates.
+            const referenceDate = loan.approved_at
+                ? new Date(loan.approved_at)
+                : new Date(); // fallback: today
+
+            for (let i = 1; i <= tenure; i++) {
+                const dueDate = new Date(referenceDate);
+                // First EMI due exactly 1 month after approval, second 2 months, etc.
+                dueDate.setMonth(dueDate.getMonth() + i);
+
+                await pool.query(`
+                    INSERT INTO loan_emis (loan_application_id, user_id, emi_number, due_date, amount, status, paid_date, transaction_id, payment_method)
+                    VALUES ($1, $2, $3, $4, $5, 'Pending', NULL, NULL, NULL)
+                `, [loan.id, userId, i, dueDate.toISOString().slice(0, 10), emiAmount]);
+            }
+
+            // Refetch generated EMIs
+            const generatedEmis = await pool.query(`
+                SELECT * FROM loan_emis
+                WHERE loan_application_id = $1
+                ORDER BY emi_number ASC
+            `, [loan.id]);
+            emis = generatedEmis.rows;
+        }
+
+        res.json({
+            success: true,
+            hasActiveLoan: true,
+            isActive: true,
+            application: loan,
+            schedule: emis
+        });
+
+    } catch (error) {
+        console.error("Error fetching repayment schedule:", error);
+        res.status(500).json({ success: false, error: 'Failed to fetch repayment schedule' });
+    }
+});
+
+// POST make payment for an EMI
+router.post('/repayment/pay/:emiId', async (req, res) => {
+    try {
+        const { emiId } = req.params;
+        const { paymentMethod } = req.body;
+
+        if (!emiId || emiId === 'undefined' || isNaN(parseInt(emiId))) {
+            return res.status(400).json({ success: false, error: 'Invalid installment ID' });
+        }
+
+        // Double payment safeguard: Verify status before updating
+        const emiCheck = await pool.query('SELECT status FROM loan_emis WHERE id = $1', [parseInt(emiId)]);
+        if (emiCheck.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'EMI record not found' });
+        }
+        if (emiCheck.rows[0].status === 'Paid') {
+            return res.status(400).json({ success: false, error: 'This EMI installment has already been successfully settled and paid.' });
+        }
+
+        const txnId = 'TXN' + Math.floor(Math.random() * 900000000000 + 100000000000);
+        const method = paymentMethod || 'Manual Payment';
+
+        const result = await pool.query(`
+            UPDATE loan_emis
+            SET status = 'Paid',
+                paid_date = CURRENT_TIMESTAMP,
+                transaction_id = $1,
+                payment_method = $2
+            WHERE id = $3
+            RETURNING *
+        `, [txnId, method, parseInt(emiId)]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'EMI record not found' });
+        }
+
+        res.json({
+            success: true,
+            message: 'EMI payment successful',
+            emi: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error("Error processing EMI payment:", error);
+        res.status(500).json({ success: false, error: 'Failed to process EMI payment' });
+    }
 });
 
 module.exports = router;

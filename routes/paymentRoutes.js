@@ -99,7 +99,7 @@ router.get("/", async (req, res) => {
 
 router.post("/confirm", upload.single("payment_image"), async (req, res) => {
   try {
-    const { user_id, utr, via_payment } = req.body;
+    const { user_id, utr, via_payment, emi_id, loan_id } = req.body;
 
     if (!user_id || !utr) {
       return res.status(400).json({
@@ -108,40 +108,48 @@ router.post("/confirm", upload.single("payment_image"), async (req, res) => {
       });
     }
 
+    const isEmiPayment = !!emi_id;
+
+    // ✅ INSERT PAYMENT WITH EMI/LOAN TRACKING
     await pool.query(
       `INSERT INTO payments 
-       (user_id, utr, via_payment, payment_image, status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       (user_id, utr, via_payment, payment_image, status, emi_id, loan_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        user_id,
+        parseInt(user_id),
         utr,
-        via_payment,
+        via_payment || 'upi_manual',
         req.file ? req.file.buffer : null,
-        false // pending verification
+        "pending",
+        emi_id ? parseInt(emi_id) : null,
+        loan_id ? parseInt(loan_id) : null,
       ]
     );
 
-    // ✅ INSERT PAYMENT
-await pool.query(
-  `INSERT INTO payments 
-   (user_id, utr, via_payment, payment_image, status)
-   VALUES ($1, $2, $3, $4, $5)`,
-  [
-    user_id,
-    utr,
-    via_payment,
-    req.file ? req.file.buffer : null,
-    false // pending verification
-  ]
-);
-
-// ✅ UPDATE STUDENT CARD (IMPORTANT)
-await pool.query(
-  `UPDATE users 
-   SET stu_card = true 
-   WHERE id = $1`,
-  [user_id]
-);
+    if (isEmiPayment) {
+      // ✅ Mark EMI as 'Pending Approval' — wait for admin
+      await pool.query(
+        `UPDATE loan_emis SET status = 'Pending Approval' WHERE id = $1`,
+        [parseInt(emi_id)]
+      );
+      // Notify user
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [parseInt(user_id), "EMI Payment Submitted",
+          "Your EMI payment screenshot has been submitted. Admin will verify and approve within a few hours."]
+      );
+    } else {
+      // ✅ Registration payment: mark student card pending
+      await pool.query(
+        `UPDATE users SET stu_card = true WHERE id = $1`,
+        [parseInt(user_id)]
+      );
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [parseInt(user_id), "Registration Payment Submitted",
+          "Your registration payment has been submitted and is pending admin verification."]
+      );
+    }
 
     res.json({
       success: true,
@@ -482,4 +490,342 @@ await pool.query(
     });
   }
 });
+
+/* =========================
+   ADMIN: GET PENDING PAYMENTS
+   ========================= */
+router.get("/admin/pending", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+         p.id,
+         p.user_id,
+         p.utr,
+         p.via_payment,
+         p.created_at,
+         p.status,
+         p.emi_id,
+         p.loan_id,
+         encode(p.payment_image, 'base64') AS payment_image_base64,
+         u.full_name,
+         u.email,
+         u.phone_number,
+         u.student_id,
+         le.emi_number,
+         le.due_date,
+         le.amount AS emi_amount,
+         la.scheme_name
+       FROM payments p
+       JOIN users u ON p.user_id = u.id
+       LEFT JOIN loan_emis le ON p.emi_id = le.id
+       LEFT JOIN loan_applications la ON p.loan_id = la.id
+       WHERE p.status = 'pending'
+       ORDER BY p.created_at DESC`
+    );
+
+    res.json({
+      success: true,
+      payments: result.rows
+    });
+  } catch (err) {
+    console.error("GET admin pending payments error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
+/* =========================
+   ADMIN: APPROVE PAYMENT
+   ========================= */
+router.post("/admin/approve/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query("BEGIN");
+
+    // Get the payment record first
+    const paymentRes = await pool.query(
+      "SELECT user_id, emi_id, loan_id FROM payments WHERE id = $1",
+      [id]
+    );
+
+    if (paymentRes.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found"
+      });
+    }
+
+    const { user_id, emi_id, loan_id } = paymentRes.rows[0];
+    const isEmiPayment = !!emi_id;
+
+    // 1. Update payment status to approved
+    await pool.query(
+      `UPDATE payments SET status = 'approved', updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+
+    if (isEmiPayment) {
+      // 2a. Mark the EMI as Paid
+      await pool.query(
+        `UPDATE loan_emis SET status = 'Paid', paid_date = NOW(), transaction_id = $1 WHERE id = $2`,
+        ['ADM' + Date.now(), emi_id]
+      );
+
+      // Get EMI details for notification message
+      const emiInfo = await pool.query(
+        `SELECT le.emi_number, le.amount, la.scheme_name 
+         FROM loan_emis le 
+         JOIN loan_applications la ON le.loan_application_id = la.id 
+         WHERE le.id = $1`,
+        [emi_id]
+      );
+      const emi = emiInfo.rows[0];
+
+      // 3a. Notification for EMI payment approved
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [
+          user_id,
+          "✅ EMI Payment Approved",
+          `Your EMI #${emi?.emi_number || ''} payment of ₹${parseFloat(emi?.amount || 0).toLocaleString('en-IN')} for "${emi?.scheme_name || 'your scheme'}" has been verified and approved!`
+        ]
+      );
+    } else {
+      // 2b. Registration payment: set reg_pay = true
+      await pool.query(
+        `UPDATE users SET reg_pay = true, updated_at = NOW() WHERE id = $1`,
+        [user_id]
+      );
+
+      // 3b. Notification for registration payment approved
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [
+          user_id,
+          "✅ Registration Payment Approved",
+          "Your manual registration payment has been successfully approved! You can now generate your Student ID card."
+        ]
+      );
+    }
+
+    await pool.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: "Payment approved successfully"
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error("Approve payment error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
+/* =========================
+   ADMIN: REJECT PAYMENT
+   ========================= */
+router.post("/admin/reject/:id", async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!reason) {
+    return res.status(400).json({
+      success: false,
+      message: "Rejection reason is required"
+    });
+  }
+
+  try {
+    await pool.query("BEGIN");
+
+    // Get the payment record first
+    const paymentRes = await pool.query(
+      "SELECT user_id, emi_id FROM payments WHERE id = $1",
+      [id]
+    );
+
+    if (paymentRes.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found"
+      });
+    }
+
+    const { user_id, emi_id } = paymentRes.rows[0];
+    const isEmiPayment = !!emi_id;
+
+    // 1. Update payment status to rejected
+    await pool.query(
+      `UPDATE payments SET status = 'rejected', rejection_reason = $1, updated_at = NOW() WHERE id = $2`,
+      [reason, id]
+    );
+
+    if (isEmiPayment) {
+      // 2a. Reset EMI back to Pending or Overdue based on due_date
+      await pool.query(
+        `UPDATE loan_emis 
+         SET status = CASE WHEN due_date < CURRENT_DATE THEN 'Overdue' ELSE 'Pending' END
+         WHERE id = $1`,
+        [emi_id]
+      );
+
+      // Get EMI details for notification
+      const emiInfo = await pool.query(
+        `SELECT le.emi_number, la.scheme_name 
+         FROM loan_emis le 
+         JOIN loan_applications la ON le.loan_application_id = la.id 
+         WHERE le.id = $1`,
+        [emi_id]
+      );
+      const emi = emiInfo.rows[0];
+
+      // 3a. Notification for EMI rejection
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [
+          user_id,
+          "❌ EMI Payment Rejected",
+          `Your EMI #${emi?.emi_number || ''} payment for "${emi?.scheme_name || 'your scheme'}" was rejected. Reason: ${reason}. Please re-submit with correct details.`
+        ]
+      );
+    } else {
+      // 2b. Clear reg_pay for registration payment rejection
+      await pool.query(
+        `UPDATE users SET reg_pay = false, updated_at = NOW() WHERE id = $1`,
+        [user_id]
+      );
+
+      // 3b. Notification for registration rejection
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)`,
+        [
+          user_id,
+          "❌ Registration Payment Rejected",
+          `Your registration payment was rejected. Reason: ${reason}. Please submit again with correct details.`
+        ]
+      );
+    }
+
+    await pool.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: "Payment rejected successfully"
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error("Reject payment error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
+/* ==========================================================
+   ADMIN: GET PAYMENT & DISBURSEMENT HISTORY (INFLOW & OUTFLOW)
+   ========================================================== */
+router.get("/admin/history", async (req, res) => {
+  try {
+    // 1. Get Inflow (all payments: approved, pending, rejected)
+    const inflowRes = await pool.query(
+      `SELECT 
+         p.id,
+         p.user_id,
+         p.utr,
+         p.via_payment,
+         p.created_at,
+         p.status,
+         p.emi_id,
+         p.loan_id,
+         u.full_name,
+         u.email,
+         u.phone_number,
+         u.student_id,
+         le.emi_number,
+         le.due_date,
+         le.amount AS emi_amount,
+         la.scheme_name,
+         COALESCE(le.amount, 1000) AS amount
+       FROM payments p
+       JOIN users u ON p.user_id = u.id
+       LEFT JOIN loan_emis le ON p.emi_id = le.id
+       LEFT JOIN loan_applications la ON p.loan_id = la.id
+       ORDER BY p.created_at DESC`
+    );
+
+    // 2. Get Outflow (all disbursed loan applications)
+    const outflowRes = await pool.query(
+      `SELECT 
+         la.id,
+         la.user_id,
+         la.scheme_name,
+         la.requested_amount AS amount,
+         la.tenure_months,
+         la.monthly_emi,
+         la.created_at,
+         la.status,
+         la.bank_name,
+         la.account_number,
+         la.account_holder,
+         la.ifsc_code,
+         u.full_name,
+         u.email,
+         u.phone_number,
+         u.student_id
+       FROM loan_applications la
+       JOIN users u ON la.user_id = u.id
+       WHERE la.status = 'disbursed'
+       ORDER BY la.created_at DESC`
+    );
+
+    // 3. Compute stats
+    let totalInflow = 0;
+    let pendingInflow = 0;
+    let rejectedInflow = 0;
+
+    inflowRes.rows.forEach(p => {
+      const amt = parseFloat(p.amount) || 0;
+      if (p.status === 'approved') {
+        totalInflow += amt;
+      } else if (p.status === 'pending') {
+        pendingInflow += amt;
+      } else if (p.status === 'rejected') {
+        rejectedInflow += amt;
+      }
+    });
+
+    let totalOutflow = 0;
+    outflowRes.rows.forEach(o => {
+      totalOutflow += parseFloat(o.amount) || 0;
+    });
+
+    res.json({
+      success: true,
+      stats: {
+        totalInflow,
+        pendingInflow,
+        rejectedInflow,
+        totalOutflow,
+        netCashflow: totalInflow - totalOutflow
+      },
+      inflow: inflowRes.rows,
+      outflow: outflowRes.rows
+    });
+  } catch (err) {
+    console.error("GET admin history error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
 module.exports = router;

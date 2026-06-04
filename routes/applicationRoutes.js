@@ -2,6 +2,67 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db/db");
 
+const syncGuardian = async (studentId, guardianName, guardianNumber, guardianRelation, guardianAadhaar, guardianPAN, fullAddress) => {
+  if (!guardianName) return;
+  try {
+    const studentUser = await db.query(
+      "SELECT emp_stu_id FROM users WHERE id = $1",
+      [studentId]
+    );
+    const employeeId = studentUser.rows.length > 0 ? studentUser.rows[0].emp_stu_id : null;
+
+    const existingGuard = await db.query(
+      "SELECT id FROM guardians WHERE student_id = $1",
+      [studentId]
+    );
+
+    const clean = (val) => (val ? val.replace(/-/g, "") : null);
+
+    if (existingGuard.rows.length > 0) {
+      await db.query(
+        `UPDATE guardians SET
+          name = $2,
+          phone = $3,
+          relation = $4,
+          aadhaar_number = $5,
+          pan_number = $6,
+          address = $7,
+          employee_id = COALESCE(employee_id, $8),
+          updated_at = NOW()
+        WHERE student_id = $1`,
+        [
+          studentId,
+          guardianName,
+          guardianNumber,
+          guardianRelation,
+          clean(guardianAadhaar),
+          guardianPAN,
+          fullAddress,
+          employeeId
+        ]
+      );
+    } else {
+      await db.query(
+        `INSERT INTO guardians (
+          student_id, name, phone, relation, aadhaar_number, pan_number, address, employee_id, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
+        [
+          studentId,
+          guardianName,
+          guardianNumber,
+          guardianRelation,
+          clean(guardianAadhaar),
+          guardianPAN,
+          fullAddress,
+          employeeId
+        ]
+      );
+    }
+  } catch (err) {
+    console.error("Error syncing guardian inside applicationRoutes:", err);
+  }
+};
+
 // ✅ GET APPLICATION BY STUDENT ID
 router.get("/get-application-by-student/:studentId", async (req, res) => {
   try {
@@ -276,6 +337,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
       );
     }
 
+    await syncGuardian(studentId, guardianName, guardianNumber, guardianRelation, guardianAadhaar, guardianPAN, fullAddress);
+
     res.json({
       success: true,
       formId: result.rows[0].id
@@ -494,6 +557,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
         ]
       );
     }
+
+    await syncGuardian(studentId, guardianName, guardianNumber, guardianRelation, guardianAadhaar, guardianPAN, fullAddress);
 
     res.json({
       success: true,
