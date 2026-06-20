@@ -130,7 +130,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
       twelfthSchoolName,
 
       employmentStatus,
-      loanReason,
+      loanReason: inputLoanReason,
+      serviceReason,
 
       guardianName,
       guardianNumber,
@@ -138,6 +139,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
       guardianAadhaar,
       guardianPAN
     } = req.body;
+
+    const loanReason = serviceReason || inputLoanReason;
 
     if (!studentId) {
       return res.status(400).json({
@@ -388,7 +391,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
       twelfthSchoolName,
 
       employmentStatus,
-      loanReason,
+      loanReason: inputLoanReason,
+      serviceReason,
 
       guardianName,
       guardianNumber,
@@ -396,6 +400,8 @@ router.post("/student-card/save-info-by-employee", async (req, res) => {
       guardianAadhaar,
       guardianPAN,
     } = req.body;
+
+    const loanReason = serviceReason || inputLoanReason;
 
     if (!studentId || !category) {
       return res.status(400).json({

@@ -11,6 +11,19 @@ const multer = require("multer");
 // Store image in memory (since you're using BYTEA)
 const upload = multer({ storage: multer.memoryStorage() });
 
+const normalizeDob = (dob) => {
+  if (!dob) return null;
+  const str = dob.toString().trim();
+  if (str.includes("/")) {
+    const parts = str.split("/");
+    if (parts.length === 3) {
+      const [day, month, year] = parts;
+      return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+    }
+  }
+  return str;
+};
+
 router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
   const { id } = req.params;
   const { full_name, phone_number, date_of_birth, gender } = req.body;
@@ -35,7 +48,7 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
       values = [
         full_name,
         phone_number,
-        date_of_birth,
+        normalizeDob(date_of_birth),
         gender,
         req.file.buffer, // 🔥 binary image
         id,
@@ -55,7 +68,7 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
       values = [
         full_name,
         phone_number,
-        date_of_birth,
+        normalizeDob(date_of_birth),
         gender,
         id,
       ];
@@ -80,10 +93,12 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  const emailNormalized = email.trim().toLowerCase();
+  const input = email.trim().toLowerCase();
 
   try {
-    // Check if user exists
+    // Check if user exists by email OR phone number
+    const isPhone = /^\d{10,11}$/.test(email.trim());
+
     const user = await pool.query(
       `SELECT 
         u.*,
@@ -91,19 +106,33 @@ router.post("/login", async (req, res) => {
         creator.email as created_by_email,
         creator.phone_number as created_by_number
       FROM users u
-      LEFT JOIN users creator ON u.created_by = creator.id
-      WHERE u.email = $1`,
-      [emailNormalized]
+      LEFT JOIN users creator ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
+      WHERE ${isPhone ? 'u.phone_number = $1' : 'LOWER(u.email) = $1'}`,
+      [isPhone ? email.trim() : input]
     );
 
     if (user.rows.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Email is not registered."
+        message: "Email or phone number is not registered."
       });
     }
 
     const userData = user.rows[0];
+
+    // Enforce role-matching login credentials
+    if (userData.role === "student" && !isPhone) {
+      return res.status(400).json({
+        success: false,
+        message: "Students must log in using their phone number."
+      });
+    }
+    if (userData.role === "employee" && isPhone) {
+      return res.status(400).json({
+        success: false,
+        message: "Employees must log in using their email address."
+      });
+    }
 
     // Check if user is active
     if (!userData.is_active) {
@@ -137,7 +166,7 @@ router.post("/login", async (req, res) => {
     if (!isPasswordValid) {
       return res.status(400).json({
         success: false,
-       message: "Invalid email or password."
+       message: "Invalid credentials. Check phone/email and password."
       });
     }
 

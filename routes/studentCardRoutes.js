@@ -76,7 +76,7 @@ const applicationSchema = Joi.object({
   aadhaarNumber: Joi.string().pattern(/^\d{4}-\d{4}-\d{4}$/).required().messages({
     "string.pattern.base": "Aadhaar must be in format XXXX-XXXX-XXXX"
   }),
-  fullAddress: Joi.string().min(5).max(500).required(),
+  fullAddress: Joi.string().allow("", null).min(5).max(500),
   panNumber: Joi.string().allow("", null).max(20),
   class: Joi.string().allow("", null).max(50),
   board: Joi.string().allow("", null).max(100),
@@ -294,8 +294,12 @@ router.put("/upload-image/:id", async (req, res) => {
 router.post("/save-info-by-employee", async (req, res) => {
   try {
     const { studentId, category, ...data } = req.body;
+    const loanReason = req.body.serviceReason || req.body.loanReason;
 
-    const { error, value: validatedData } = applicationSchema.validate({ userId: studentId, category, ...data }, { abortEarly: false });
+    const { error, value: validatedData } = applicationSchema.validate(
+      { userId: studentId, category, loanReason, ...data },
+      { abortEarly: false, allowUnknown: true, stripUnknown: true }
+    );
     
     if (error) {
       return res.status(400).json({

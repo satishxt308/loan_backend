@@ -303,6 +303,41 @@ router.put("/application-documents/:id", async (req, res) => {
         "Application Approved 🎉",
         "Your application has been approved"
       );
+
+      // ✅ Auto-activate student card if registration payment is already approved
+      try {
+        const userRes = await pool.query(
+          "SELECT student_id, reg_pay FROM users WHERE id = $1",
+          [app.user_id]
+        );
+        if (userRes.rows.length > 0 && !userRes.rows[0].student_id && userRes.rows[0].reg_pay) {
+          const random = Math.floor(1000000000 + Math.random() * 9000000000);
+          const studentId = `PSWB${random}`;
+          
+          await pool.query(
+            `UPDATE users 
+             SET 
+               student_id = $1,
+               stu_card = TRUE,
+               stu_card_verified = TRUE
+             WHERE id = $2`,
+            [studentId, app.user_id]
+          );
+
+          await pool.query(
+            `INSERT INTO notifications (user_id, title, message)
+             VALUES ($1, $2, $3)`,
+            [
+              app.user_id,
+              "🎓 Student ID Generated",
+              `Your Student ID is ${studentId}`
+            ]
+          );
+          console.log(`Auto-activated student card for user ${app.user_id} on application approval.`);
+        }
+      } catch (err) {
+        console.error("Auto-activation error on application approval:", err);
+      }
     }
 
     // 4️⃣ Notification

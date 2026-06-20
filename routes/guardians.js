@@ -102,10 +102,10 @@ router.post("/add", async (req, res) => {
       ]
     );
 
-    // Update student's emp_stu_id if not already set
+    // Update student's emp_stu_id and created_by if not already set
     if (!student.emp_stu_id) {
       await pool.query(
-        "UPDATE users SET emp_stu_id = $1 WHERE id = $2",
+        "UPDATE users SET emp_stu_id = $1, created_by = COALESCE(created_by, $1) WHERE id = $2",
         [employeeId, studentId]
       );
     }

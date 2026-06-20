@@ -57,7 +57,7 @@ LEFT JOIN LATERAL (
 
 LEFT JOIN guardians g 
   ON g.student_id = u.id
-AND g.status = 'active'
+AND g.status = 'approved'
 -- ✅ LATEST APPROVED PAYMENT
 LEFT JOIN LATERAL (
   SELECT created_at

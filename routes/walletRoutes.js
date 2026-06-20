@@ -279,4 +279,136 @@ router.put("/admin/update/:id", async (req, res) => {
   }
 });
 
+// ✅ ADMIN DIRECT CREDIT INDIVIDUAL
+router.post("/admin/credit-individual", async (req, res) => {
+  const { userId, amount, note } = req.body;
+
+  if (!userId || !amount || amount <= 0) {
+    return fail(res, "Invalid user ID or amount");
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Check if user exists and is employee
+    const userRes = await client.query(
+      "SELECT full_name, role FROM users WHERE id = $1",
+      [userId]
+    );
+
+    if (userRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return fail(res, "Employee not found");
+    }
+
+    const employee = userRes.rows[0];
+    if (employee.role !== 'employee') {
+      await client.query("ROLLBACK");
+      return fail(res, "User is not an employee");
+    }
+
+    const utr = `ADMIN-MANUAL-${Date.now()}`;
+    const txnNote = note || "Direct Credit from Admin";
+
+    // Insert wallet transaction
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, utr, note, status, created_at)
+       VALUES ($1, 'ADD', $2, $3, $4, 'APPROVED', CURRENT_TIMESTAMP)`,
+      [userId, amount, utr, txnNote]
+    );
+
+    // Update wallet balance
+    await client.query(
+      `UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`,
+      [amount, userId]
+    );
+
+    // Create notification
+    const notifMsg = `Your wallet has been credited with ₹${amount} by Admin. Note: ${txnNote}`;
+    await client.query(
+      `INSERT INTO notifications (user_id, title, message, created_at)
+       VALUES ($1, 'Wallet Credited', $2, CURRENT_TIMESTAMP)`,
+      [userId, notifMsg]
+    );
+
+    await client.query("COMMIT");
+    success(res, "Wallet credited successfully");
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Admin manual credit error:", err);
+    fail(res, err.message, 500);
+  } finally {
+    client.release();
+  }
+});
+
+// ✅ ADMIN DIRECT CREDIT BULK (DAILY/MONTHLY)
+router.post("/admin/credit-bulk", async (req, res) => {
+  const { employeeIds, amount, note, scheduleType } = req.body;
+
+  if (!amount || amount <= 0) {
+    return fail(res, "Invalid amount");
+  }
+
+  if (!employeeIds || !Array.isArray(employeeIds) || employeeIds.length === 0) {
+    return fail(res, "No employees selected");
+  }
+
+  const typeLabel = scheduleType ? scheduleType.toUpperCase() : "BULK";
+  const txnNote = note || `Admin ${scheduleType || 'Bulk'} Credit`;
+  
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    for (const userId of employeeIds) {
+      // Verify user is employee
+      const userRes = await client.query(
+        "SELECT id FROM users WHERE id = $1 AND role = 'employee'",
+        [userId]
+      );
+      if (userRes.rows.length === 0) {
+        continue; // Skip invalid or non-employee users
+      }
+
+      const utr = `ADMIN-BULK-${typeLabel}-${userId}-${Date.now()}`;
+
+      // Insert transaction
+      await client.query(
+        `INSERT INTO wallet_transactions 
+         (user_id, type, amount, utr, note, status, created_at)
+         VALUES ($1, 'ADD', $2, $3, $4, 'APPROVED', CURRENT_TIMESTAMP)`,
+        [userId, amount, utr, txnNote]
+      );
+
+      // Update wallet balance
+      await client.query(
+        `UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`,
+        [amount, userId]
+      );
+
+      // Create notification
+      const notifMsg = `Your wallet has been credited with a bulk payment of ₹${amount} by Admin. Note: ${txnNote}`;
+      await client.query(
+        `INSERT INTO notifications (user_id, title, message, created_at)
+         VALUES ($1, 'Wallet Bulk Credit', $2, CURRENT_TIMESTAMP)`,
+        [userId, notifMsg]
+      );
+    }
+
+    await client.query("COMMIT");
+    success(res, `Bulk credit processed successfully for selected employees`);
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Admin bulk credit error:", err);
+    fail(res, err.message, 500);
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;

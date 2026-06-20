@@ -443,10 +443,64 @@ router.post("/employee/deduct-wallet", async (req, res) => {
 // ✅ UPDATE STUDENT CARD STATUS
 await pool.query(
   `UPDATE users 
-   SET stu_card = true 
+   SET stu_card = true, reg_pay = true 
    WHERE id = $1`,
   [student_id]
 );
+
+// ✅ AUTO-ACTIVATE IF APPLICATION & DOCUMENTS APPROVED
+try {
+  const appRes = await pool.query(
+    `SELECT id, status, field_status FROM applications WHERE user_id = $1 LIMIT 1`,
+    [student_id]
+  );
+  if (appRes.rows.length > 0) {
+    const app = appRes.rows[0];
+    
+    const docsRes = await pool.query(
+      `SELECT status FROM application_documents WHERE application_id = $1`,
+      [app.id]
+    );
+    const docsApproved = docsRes.rows.length > 0 && docsRes.rows.every(d => d.status === "approved");
+    
+    const fieldsApproved = app.field_status && Object.values(app.field_status).every(s => s === "approved");
+    
+    if (app.status === "approved" || (docsApproved && fieldsApproved)) {
+      if (app.status !== "approved") {
+        await pool.query(
+          `UPDATE applications SET status = 'approved', last_updated = NOW() WHERE id = $1`,
+          [app.id]
+        );
+      }
+
+      const random = Math.floor(1000000000 + Math.random() * 9000000000);
+      const genStudentId = `PSWB${random}`;
+      
+      await pool.query(
+        `UPDATE users 
+         SET 
+           student_id = $1,
+           stu_card = TRUE,
+           stu_card_verified = TRUE
+         WHERE id = $2`,
+        [genStudentId, student_id]
+      );
+
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message)
+         VALUES ($1, $2, $3)`,
+        [
+          student_id,
+          "🎓 Student ID Generated",
+          `Your Student ID is ${genStudentId}. Your profile has been auto-activated.`
+        ]
+      );
+      console.log(`Auto-activated student card for user ${student_id} on wallet payment deduction.`);
+    }
+  }
+} catch (err) {
+  console.error("Auto-activation error on wallet payment deduction:", err);
+}
     // ✅ TRANSACTION LOG
     await pool.query(
       `INSERT INTO transactions 
@@ -593,7 +647,6 @@ router.post("/admin/approve/:id", async (req, res) => {
           `Your EMI #${emi?.emi_number || ''} payment of ₹${parseFloat(emi?.amount || 0).toLocaleString('en-IN')} for "${emi?.scheme_name || 'your scheme'}" has been verified and approved!`
         ]
       );
-    } else {
       // 2b. Registration payment: set reg_pay = true
       await pool.query(
         `UPDATE users SET reg_pay = true, updated_at = NOW() WHERE id = $1`,
@@ -609,6 +662,56 @@ router.post("/admin/approve/:id", async (req, res) => {
           "Your manual registration payment has been successfully approved! You can now generate your Student ID card."
         ]
       );
+
+      // 4b. Auto-activate student card if application and documents are already approved
+      try {
+        const userRes = await pool.query(
+          "SELECT student_id FROM users WHERE id = $1",
+          [user_id]
+        );
+        if (userRes.rows.length > 0 && !userRes.rows[0].student_id) {
+          const appRes = await pool.query(
+            "SELECT id, status FROM applications WHERE user_id = $1",
+            [user_id]
+          );
+          if (appRes.rows.length > 0 && appRes.rows[0].status === "approved") {
+            const appId = appRes.rows[0].id;
+            const docsRes = await pool.query(
+              "SELECT status FROM application_documents WHERE application_id = $1",
+              [appId]
+            );
+            const allDocsApproved = docsRes.rows.length > 0 && docsRes.rows.every(d => d.status === "approved");
+            
+            if (allDocsApproved) {
+              const random = Math.floor(1000000000 + Math.random() * 9000000000);
+              const studentId = `PSWB${random}`;
+              
+              await pool.query(
+                `UPDATE users 
+                 SET 
+                   student_id = $1,
+                   stu_card = TRUE,
+                   stu_card_verified = TRUE
+                 WHERE id = $2`,
+                [studentId, user_id]
+              );
+
+              await pool.query(
+                `INSERT INTO notifications (user_id, title, message)
+                 VALUES ($1, $2, $3)`,
+                [
+                  user_id,
+                  "🎓 Student ID Generated",
+                  `Your Student ID is ${studentId}`
+                ]
+              );
+              console.log(`Auto-activated student card for user ${user_id} on payment approval.`);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Auto-activation error on payment approval:", err);
+      }
     }
 
     await pool.query("COMMIT");

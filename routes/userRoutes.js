@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/db");
 
-const { Resend } = require("resend");
+const { Resend } = require("resend"); 
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 const bcrypt = require("bcryptjs");
@@ -13,14 +13,30 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // Import professional email templates
 const emailTemplates = require("../utils/emailTemplates");
 
+const normalizeDob = (dob) => {
+  if (!dob) return null;
+  const str = dob.toString().trim();
+  if (str.includes("/")) {
+    const parts = str.split("/");
+    if (parts.length === 3) {
+      const [day, month, year] = parts;
+      return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+    }
+  }
+  return str;
+};
+
 // ===========================
 // SEND OTP VIA EMAIL (WITH TEMPLATE)
 // ===========================
 router.post("/send-otp", async (req, res) => {
-  const { email } = req.body;
+  const { email, bypassCheck } = req.body;
 
   if (!email) {
-    return res.status(400).json({ success: false, message: "Email is required" });
+    return res.status(400).json({
+      success: false,
+      message: "Email is required"
+    });
   }
 
   const emailNormalized = email.trim().toLowerCase();
@@ -31,7 +47,7 @@ router.post("/send-otp", async (req, res) => {
       [emailNormalized]
     );
 
-    if (existingUser.rows.length > 0) {
+    if (!bypassCheck && existingUser.rows.length > 0) {
       return res.status(400).json({
         success: false,
         message: "Email already registered. Please login."
@@ -130,29 +146,110 @@ router.get("/check-email/:email", async (req, res) => {
 // ===========================
 router.post("/complete-registration", async (req, res) => {
   try {
-    const { fullName, dateOfBirth, gender, role, phoneNumber, email, password } = req.body;
+   const {
+  fullName,
+  dateOfBirth,
+  gender,
+  role,
+  phoneNumber,
+  email,
+  password,
+  termsAccepted,
+  termsAcceptedAt
+} = req.body;
 
-    const emailNormalized = email.trim().toLowerCase();
-    const record = global.otpStore?.[emailNormalized];
 
-    if (!record || !record.verified) {
+    // phone can be 10 or 11 digits
+    if (!/^\d{10,11}$/.test(phoneNumber)) {
       return res.status(400).json({
         success: false,
-        message: "OTP not verified"
+        message: "Phone number must be 10 or 11 digits"
       });
     }
+
+    const existingPhone = await pool.query(
+  "SELECT id FROM users WHERE phone_number = $1",
+  [phoneNumber]
+);
+
+if (existingPhone.rows.length > 0) {
+  return res.status(400).json({
+    success: false,
+    message: "Phone number already registered"
+  });
+}
+
+   let emailNormalized = null;
+
+if (role === "employee") {
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: "Email is required"
+    });
+  }
+
+  emailNormalized = email.trim().toLowerCase();
+
+  const existingUser = await pool.query(
+    "SELECT id FROM users WHERE LOWER(email) = LOWER($1)",
+    [emailNormalized]
+  );
+
+  if (existingUser.rows.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Email already registered"
+    });
+  }
+} else {
+  emailNormalized = `member_${phoneNumber}@pswb.local`;
+}
+
+ if (role === "employee") {
+  const record = global.otpStore?.[emailNormalized];
+
+  if (!record || !record.verified) {
+    return res.status(400).json({
+      success: false,
+      message: "OTP not verified"
+    });
+  }
+}
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO users 
-      (full_name, date_of_birth, gender, role, phone_number, email, password, otp_verified)
+      `INSERT INTO users
+      (
+        full_name,
+        date_of_birth,
+        gender,
+        role,
+        phone_number,
+        email,
+        password,
+        otp_verified
+      )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       RETURNING id, full_name, email, role`,
-      [fullName, dateOfBirth, gender, role, phoneNumber, emailNormalized, hashedPassword, true]
+      [
+  fullName,
+  normalizeDob(dateOfBirth),
+  gender,
+  role,
+  phoneNumber,
+  emailNormalized,
+  hashedPassword,
+  role === "employee"
+    ? global.otpStore?.[emailNormalized]?.verified === true
+    : true
+]
     );
 
-    delete global.otpStore[emailNormalized];
+    if (emailNormalized && global.otpStore) {
+  delete global.otpStore[emailNormalized];
+}
 
     res.json({
       success: true,
@@ -161,7 +258,10 @@ router.post("/complete-registration", async (req, res) => {
 
   } catch (err) {
     console.error("Registration Error:", err);
-    res.status(500).json({ success: false, message: "Registration failed" });
+    res.status(500).json({
+      success: false,
+      message: "Registration failed"
+    });
   }
 });
 
@@ -187,38 +287,51 @@ router.post("/employee/add-student", async (req, res) => {
       });
     }
 
-    const emailNormalized = email.trim().toLowerCase();
+    const existingPhone = await pool.query(
+  "SELECT id FROM users WHERE phone_number = $1",
+  [phone]
+);
 
-    const record = global.otpStore?.[emailNormalized];
+if (existingPhone.rows.length > 0) {
+  return res.status(400).json({
+    success: false,
+    message: "Phone number already registered"
+  });
+}
 
-    if (!record || !record.verified) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP not verified"
-      });
-    }
+    const emailNormalized = email && email.trim() ? email.trim().toLowerCase() : null;
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO users 
-      (full_name, date_of_birth, gender, role, phone_number, email, password, otp_verified, emp_stu_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-      RETURNING id, full_name, email, role, emp_stu_id`,
+      `INSERT INTO users
+      (
+        full_name,
+        date_of_birth,
+        gender,
+        role,
+        phone_number,
+        email,
+        password,
+        otp_verified,
+        emp_stu_id,
+        created_by
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING id, full_name, email, role, emp_stu_id, created_by`,
       [
         name,
-        dateOfBirth,
+        normalizeDob(dateOfBirth),
         gender,
         "student",
         phone,
         emailNormalized,
         hashedPassword,
-        true,
-        emp_id
+        true, // automatically verified
+        emp_id,
+        emp_id  // ✅ created_by bhi save karo
       ]
     );
-
-    delete global.otpStore[emailNormalized];
 
     res.json({
       success: true,
@@ -227,6 +340,14 @@ router.post("/employee/add-student", async (req, res) => {
 
   } catch (err) {
     console.error("EMP ADD STUDENT ERROR:", err);
+
+    if (err.code === "23505") {
+      return res.status(400).json({
+        success: false,
+        message: "Email already exists"
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: "Failed to add student"
@@ -459,23 +580,28 @@ router.get("/all-users", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        id,
-        full_name,
-        email,
-        phone_number,
-        date_of_birth,
-        gender,
-        role,
-        otp_verified,
-        stu_card,
-        stu_card_verified,
-        emp_card,
-        emp_card_verified,
-        reg_pay,
-        is_active,
-        created_at
-      FROM users
-      ORDER BY id ASC;
+        u.id,
+        u.full_name,
+        u.email,
+        u.phone_number,
+        u.date_of_birth,
+        u.gender,
+        u.role,
+        u.otp_verified,
+        u.stu_card,
+        u.stu_card_verified,
+        u.emp_card,
+        u.emp_card_verified,
+        u.reg_pay,
+        u.is_active,
+        u.created_at,
+        COALESCE(u.created_by, u.emp_stu_id) AS created_by,
+        emp.full_name AS created_by_name,
+        emp.phone_number AS created_by_phone,
+        emp.email AS created_by_email
+      FROM users u
+      LEFT JOIN users emp ON COALESCE(u.created_by, u.emp_stu_id) = emp.id
+      ORDER BY u.id ASC;
     `);
 
     res.json({
@@ -576,25 +702,99 @@ router.get("/employee/students/:emp_id", async (req, res) => {
 // UPDATE USER ROLE
 // ===========================
 router.put("/update-role/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { role } = req.body;
+  const { id } = req.params;
+  const { role, email } = req.body;
 
-    const allowed = ["student", "employee"];
-    if (!allowed.includes(role.toLowerCase())) {
-      return res.status(400).json({ success: false, message: "Invalid role" });
+  const roleLower = role?.toLowerCase();
+  const allowed = ["student", "employee"];
+  if (!allowed.includes(roleLower)) {
+    return res.status(400).json({ success: false, message: "Invalid role" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Fetch user details first
+    const userRes = await client.query(
+      "SELECT phone_number, email FROM users WHERE id = $1",
+      [id]
+    );
+    if (userRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    await pool.query(
-      `UPDATE users SET role=$1 WHERE id=$2`,
-      [role.toLowerCase(), id]
-    );
+    const user = userRes.rows[0];
 
-    res.json({ success: true, message: "Role updated successfully" });
+    if (roleLower === "student") {
+      const studentEmail = `member_${user.phone_number}@pswb.local`;
+
+      // Update user details & reset card statuses
+      await client.query(
+        `UPDATE users 
+         SET role = 'student',
+             email = $1,
+             stu_card = false,
+             stu_card_verified = false,
+             reg_pay = false,
+             student_id = null,
+             guard_card = false,
+             emp_card = false,
+             emp_card_verified = false,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [studentEmail, id]
+      );
+
+      // Purge previous applications, documents, guardians
+      await client.query("DELETE FROM applications WHERE user_id = $1", [id]);
+      await client.query("DELETE FROM application_documents WHERE user_id = $1", [id]);
+      await client.query("DELETE FROM guardians WHERE student_id = $1", [id]);
+      await client.query("DELETE FROM emp_documents WHERE user_id = $1", [id]);
+
+    } else if (roleLower === "employee") {
+      // Determine new email (use passed email, or current email if it's not a placeholder)
+      let newEmail = email ? email.trim().toLowerCase() : null;
+      if (!newEmail && user.email && !user.email.includes("@pswb.local")) {
+        newEmail = user.email;
+      }
+      if (!newEmail) {
+        newEmail = `employee_${user.phone_number}@pswb.local`; // fallback
+      }
+
+      await client.query(
+        `UPDATE users 
+         SET role = 'employee',
+             email = $1,
+             stu_card = false,
+             stu_card_verified = false,
+             reg_pay = false,
+             student_id = null,
+             guard_card = false,
+             emp_card = false,
+             emp_card_verified = false,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [newEmail, id]
+      );
+
+      // Purge student-specific fields/tables
+      await client.query("DELETE FROM applications WHERE user_id = $1", [id]);
+      await client.query("DELETE FROM application_documents WHERE user_id = $1", [id]);
+      await client.query("DELETE FROM guardians WHERE student_id = $1", [id]);
+      await client.query("DELETE FROM emp_documents WHERE user_id = $1", [id]);
+    }
+
+    await client.query("COMMIT");
+    res.json({ success: true, message: `Role updated to ${roleLower} successfully` });
 
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Role update error:", error);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(500).json({ success: false, message: "Server error during role conversion" });
+  } finally {
+    client.release();
   }
 });
 
@@ -680,6 +880,7 @@ router.get("/:id", async (req, res) => {
       `SELECT 
         id,
         full_name,
+        email,
         stu_card,
         stu_card_verified,
         emp_card,
@@ -836,7 +1037,11 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
       values = [full_name, date_of_birth, gender, phone_number, role, id];
     }
 
-    const result = await pool.query(updateQuery, values);
+    const result = await pool.query(updateQuery, [
+      ...values.slice(0, 1),
+      normalizeDob(values[1]),
+      ...values.slice(2)
+    ]);
 
     res.json({
       success: true,

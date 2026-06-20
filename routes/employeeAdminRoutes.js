@@ -63,6 +63,7 @@ router.get("/employees", async (req, res) => {
         u.emp_card,
         u.emp_card_verified,
         u.is_active,
+        u.wallet_balance,
         ec.aadhaar_number,
         ec.full_address,
         ec.pan_number,
@@ -94,7 +95,8 @@ router.get("/employees", async (req, res) => {
       referral_source: emp.referral_source,
       emp_card: emp.emp_card,
       emp_card_verified: emp.emp_card_verified,
-      is_active: emp.is_active
+      is_active: emp.is_active,
+      wallet_balance: parseFloat(emp.wallet_balance || 0)
     }));
 
     res.json({
