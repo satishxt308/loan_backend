@@ -856,7 +856,7 @@ router.get("/admin/history", async (req, res) => {
          le.due_date,
          le.amount AS emi_amount,
          la.scheme_name,
-         COALESCE(le.amount, 1000) AS amount
+         COALESCE(le.amount, 1200) AS amount
        FROM payments p
        JOIN users u ON p.user_id = u.id
        LEFT JOIN loan_emis le ON p.emi_id = le.id
