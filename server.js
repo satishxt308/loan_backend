@@ -7,9 +7,11 @@ const cors = require("cors");
 require("./db/db");
 
 app.use(cors());
-// app.use(express.json());
-app.use(express.json({ limit: "2mb" })); 
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({
+    extended: true,
+    limit: "50mb"
+}));
 
 // Import routes
 const userRoutes = require("./routes/userRoutes");
@@ -29,6 +31,9 @@ const employeeAdminRoutes = require("./routes/employeeAdminRoutes");
 const applicationRoutes = require("./routes/applicationRoutes");
 const schemeRoutes = require("./routes/schemes");
 const employeeDocumentRoutes = require('./routes/employeeDocuments');
+const citizenRoutes = require("./routes/citizenRoutes");
+const citizenPaymentRoutes = require("./routes/citizenPaymentRoutes");
+const citizenDocumentRoutes = require("./routes/citizenDocumentRoutes"); // NEW
 
 app.use("/api/auth", require("./routes/auth"));
 app.use('/api/applications', require('./routes/applications'));
@@ -48,7 +53,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/policies", policyRoutes);
 app.use("/api/video/video-types", videoTypeRoutes);
 app.use("/api/video/videos", videoRoutes);
-app.use("/api/reg-payment", regPaymentRoutes); 
+app.use("/api/reg-payment", regPaymentRoutes);
 app.use("/api/admin", studentDocumentsRoutes);
 app.use("/api/admin", employeeAdminRoutes);
 app.use('/api/employee', employeeDocumentRoutes);
@@ -56,11 +61,15 @@ app.use("/api/schemes", schemeRoutes);
 app.use("/api/notification", notifyRoutes);
 app.use("/api", applicationRoutes);
 
+// Citizen Routes
+app.use("/api/citizens", citizenRoutes);
+app.use("/api/citizen-payment", citizenPaymentRoutes);
+app.use("/api/citizen-documents", citizenDocumentRoutes); // NEW
 
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Accessible locally at http://localhost:${PORT}`);
-  console.log(`🌐 Accessible on network at http://10.164.109.99:${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📡 Accessible locally at http://localhost:${PORT}`);
+    console.log(`🌐 Accessible on network at http://10.164.109.99:${PORT}`);
 });

@@ -90,106 +90,164 @@ router.put("/update/:id", upload.single("profile_image"), async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-
-  const input = email.trim().toLowerCase();
-
+router.post("/citizen-login", async (req, res) => {
   try {
-    // Check if user exists by email OR phone number
-    const isPhone = /^\d{10,11}$/.test(email.trim());
+    const { phone_number } = req.body;
 
-    const user = await pool.query(
-      `SELECT 
-        u.*,
-        creator.full_name as created_by_name,
-        creator.email as created_by_email,
-        creator.phone_number as created_by_number
-      FROM users u
-      LEFT JOIN users creator ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
-      WHERE ${isPhone ? 'u.phone_number = $1' : 'LOWER(u.email) = $1'}`,
-      [isPhone ? email.trim() : input]
+    // console.log("PHONE:", phone_number);
+
+    const result = await pool.query(
+      `SELECT *
+       FROM users
+       WHERE phone_number = $1
+       LIMIT 1`,
+      [phone_number]
     );
 
-    if (user.rows.length === 0) {
-      return res.status(400).json({
+    // console.log(result.rows);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: "Email or phone number is not registered."
+        message: "User not found",
       });
     }
 
-    const userData = user.rows[0];
+    const user = result.rows[0];
 
-    // Enforce role-matching login credentials
-    if (userData.role === "student" && !isPhone) {
-      return res.status(400).json({
-        success: false,
-        message: "Students must log in using their phone number."
-      });
-    }
-    if (userData.role === "employee" && isPhone) {
-      return res.status(400).json({
-        success: false,
-        message: "Employees must log in using their email address."
-      });
-    }
-
-    // Check if user is active
-    if (!userData.is_active) {
-      let contactMessage = "Please contact with admin 9876543210 or pswinners2025@gmail.com";
-      
-      if (userData.created_by) {
-        if (userData.created_by_name) {
-          contactMessage = `Account disabled. Please contact your supervisor ${userData.created_by_name} (${userData.created_by_number || 'No number'} / ${userData.created_by_email || 'No email'})`;
-        } else {
-          contactMessage = "Account disabled. Please contact system administrator.";
-        }
-      }
-      
+    if (user.role !== "citizen") {
       return res.status(403).json({
         success: false,
-        message: contactMessage
+        message: "Only citizen accounts can use this login.",
       });
     }
 
-    // Check if email is verified
+    return res.json({
+      success: true,
+      user,
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+});
+
+router.post("/login", async (req, res) => {
+  console.log("BODY:", req.body);
+  const { email, phone_number, password } = req.body;
+
+  try {
+    let result;
+
+    // Employee login (email)
+    if (email) {
+      result = await pool.query(
+        `SELECT
+            u.*,
+            creator.full_name AS created_by_name,
+            creator.email AS created_by_email,
+            creator.phone_number AS created_by_number
+         FROM users u
+         LEFT JOIN users creator
+           ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
+         WHERE LOWER(u.email)=LOWER($1)`,
+        [email.trim()]
+      );
+    }
+
+    // Student login (phone)
+    else if (phone_number) {
+      result = await pool.query(
+        `SELECT
+            u.*,
+            creator.full_name AS created_by_name,
+            creator.email AS created_by_email,
+            creator.phone_number AS created_by_number
+         FROM users u
+         LEFT JOIN users creator
+           ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
+         WHERE u.phone_number=$1`,
+        [phone_number.trim()]
+      );
+    }
+
+    else {
+      return res.status(400).json({
+        success: false,
+        message: "Email or phone number is required."
+      });
+    }
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "User not found."
+      });
+    }
+
+    const userData = result.rows[0];
+
+    // Employee must use email
+    if (userData.role === "employee" && !email) {
+      return res.status(400).json({
+        success: false,
+        message: "Employees must login using email."
+      });
+    }
+
+    // Student must use phone
+    if (userData.role === "student" && !phone_number) {
+      return res.status(400).json({
+        success: false,
+        message: "Students must login using phone number."
+      });
+    }
+
+    if (!userData.is_active) {
+      return res.status(403).json({
+        success: false,
+        message: "Account disabled."
+      });
+    }
+
     if (!userData.otp_verified) {
       return res.status(400).json({
         success: false,
-        message: "Email not verified. Please complete registration."
+        message: "Email not verified."
       });
     }
 
-    // Check password
-    const isPasswordValid = await bcrypt.compare(password, userData.password);
-    
-    if (!isPasswordValid) {
+    const validPassword = await bcrypt.compare(password, userData.password);
+
+    if (!validPassword) {
       return res.status(400).json({
         success: false,
-       message: "Invalid credentials. Check phone/email and password."
+        message: "Invalid password."
       });
     }
 
-    // Login successful
-    res.json({
+    return res.json({
       success: true,
       message: "Login successful",
       user: {
         id: userData.id,
-        email: userData.email,
         role: userData.role,
         full_name: userData.full_name,
-        phone_number: userData.phone_number,  // Using phone_number
+        email: userData.email,
+        phone_number: userData.phone_number,
         is_active: userData.is_active,
-        created_by: userData.created_by
       }
     });
 
-  } catch (error) {
-    console.error("Login Error:", error);
-    res.status(500).json({
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
       success: false,
-      message: "Server error during login"
+      message: "Server error."
     });
   }
 });
