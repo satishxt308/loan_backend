@@ -138,13 +138,29 @@ router.post("/citizen-login", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   console.log("BODY:", req.body);
-  const { email, phone_number, password } = req.body;
+
+  const { email, password } = req.body;
+
+  const loginValue = (email || "").trim();
+  const isPhone = /^\d{10}$/.test(loginValue);
 
   try {
     let result;
 
-    // Employee login (email)
-    if (email) {
+    if (isPhone) {
+      result = await pool.query(
+        `SELECT
+            u.*,
+            creator.full_name AS created_by_name,
+            creator.email AS created_by_email,
+            creator.phone_number AS created_by_number
+         FROM users u
+         LEFT JOIN users creator
+           ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
+         WHERE u.phone_number = $1`,
+        [loginValue]
+      );
+    } else {
       result = await pool.query(
         `SELECT
             u.*,
@@ -155,31 +171,8 @@ router.post("/login", async (req, res) => {
          LEFT JOIN users creator
            ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
          WHERE LOWER(u.email)=LOWER($1)`,
-        [email.trim()]
+        [loginValue]
       );
-    }
-
-    // Student login (phone)
-    else if (phone_number) {
-      result = await pool.query(
-        `SELECT
-            u.*,
-            creator.full_name AS created_by_name,
-            creator.email AS created_by_email,
-            creator.phone_number AS created_by_number
-         FROM users u
-         LEFT JOIN users creator
-           ON COALESCE(u.created_by, u.emp_stu_id) = creator.id
-         WHERE u.phone_number=$1`,
-        [phone_number.trim()]
-      );
-    }
-
-    else {
-      return res.status(400).json({
-        success: false,
-        message: "Email or phone number is required."
-      });
     }
 
     if (result.rows.length === 0) {
@@ -191,16 +184,14 @@ router.post("/login", async (req, res) => {
 
     const userData = result.rows[0];
 
-    // Employee must use email
-    if (userData.role === "employee" && !email) {
+    if (userData.role === "employee" && isPhone) {
       return res.status(400).json({
         success: false,
         message: "Employees must login using email."
       });
     }
 
-    // Student must use phone
-    if (userData.role === "student" && !phone_number) {
+    if (userData.role === "student" && !isPhone) {
       return res.status(400).json({
         success: false,
         message: "Students must login using phone number."
