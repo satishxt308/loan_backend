@@ -21,6 +21,7 @@ router.post("/add", async (req, res) => {
             name,
             dateOfBirth,
             age,
+            nomineeName,
             address,
             phone,
             gender,
@@ -83,13 +84,17 @@ router.post("/add", async (req, res) => {
         await client.query(
             `
             INSERT INTO citizens
-            (user_id, employee_id, name, date_of_birth, age, address, phone, 
+            (user_id, employee_id, name, date_of_birth, age,nominee_name, address, phone, 
              gender, occupation, annual_income, aadhaar_number, pan_number,
              photo, aadhaar_card_image, pan_card_image, verification_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending')
+            VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8,
+    $9, $10, $11, $12, $13, $14, $15,
+    $16, 'pending'
+)
             `,
             [
-                userId, employeeId, name, dateOfBirth, age, address, phone,
+                userId, employeeId, name, dateOfBirth, age, nomineeName, address, phone,
                 gender, occupation, annualIncome, aadhaarNumber, panNumber,
                 photoBuffer, aadhaarBuffer, panBuffer
             ]
@@ -263,6 +268,7 @@ router.put("/:id", async (req, res) => {
             name,
             dateOfBirth,
             age,
+            nomineeName,
             address,
             phone,
             gender,
@@ -290,14 +296,14 @@ router.put("/:id", async (req, res) => {
         // Update citizens table
         await client.query(
             `UPDATE citizens
-             SET name = $1, date_of_birth = $2, age = $3, address = $4, phone = $5,
-                 gender = $6, occupation = $7, annual_income = $8,
-                 aadhaar_number = $9, pan_number = $10, photo = $11,
-                 aadhaar_card_image = $12, pan_card_image = $13,
+             SET name = $1, date_of_birth = $2, age = $3, nominee_name =$4, address = $5, phone = $6,
+                 gender = $7, occupation = $8, annual_income = $9,
+                 aadhaar_number = $10, pan_number = $11, photo = $12,
+                 aadhaar_card_image = $13, pan_card_image = $14,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE id = $14`,
+             WHERE id = $15`,
             [
-                name, dateOfBirth, age, address, phone,
+                name, dateOfBirth, age, nomineeName, address, phone,
                 gender, occupation, annualIncome,
                 aadhaarNumber, panNumber,
                 photoBuffer, aadhaarBuffer, panBuffer,
