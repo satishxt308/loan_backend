@@ -13,10 +13,13 @@ SELECT
   u.id AS user_id,
   u.full_name,
   u.student_id,
+  u.date_of_birth,
   u.gender,
   u.email,
   u.phone_number,
-  u.profile_image,
+  a.id AS application_id,
+ad.document_file,
+ad.mime_type,
   u.guard_card,
   u.is_active,
 
@@ -45,7 +48,7 @@ SELECT
 
 FROM users u
 
--- ✅ ONLY APPROVED APPLICATION (important)
+-- ✅ ONLY APPROVED APPLICATION
 LEFT JOIN LATERAL (
   SELECT *
   FROM applications
@@ -55,11 +58,14 @@ LEFT JOIN LATERAL (
   LIMIT 1
 ) a ON true
 
-LEFT JOIN guardians g 
+LEFT JOIN application_documents ad
+  ON ad.application_id = a.id
+ AND ad.document_key = 'own_image'
+
+LEFT JOIN guardians g
   ON g.student_id = u.id
-AND g.status = 'approved'
--- ✅ LATEST APPROVED PAYMENT
-LEFT JOIN LATERAL (
+ AND g.status = 'approved'
+ LEFT JOIN LATERAL (
   SELECT created_at
   FROM payments
   WHERE user_id = u.id
@@ -79,10 +85,14 @@ WHERE u.id = $1
 
     const user = result.rows[0];
 
-    // ✅ Convert image
-    if (user.profile_image) {
-      user.profile_image = `data:image/png;base64,${user.profile_image.toString("base64")}`;
-    }
+    if (user.document_file) {
+  user.profile_image = `data:${user.mime_type};base64,${user.document_file.toString("base64")}`;
+} else {
+  user.profile_image = null;
+}
+
+delete user.document_file;
+delete user.mime_type;
 
     res.json(user);
 

@@ -330,6 +330,50 @@ router.put("/:id", async (req, res) => {
     }
 });
 
+router.get("/citizen/:userId", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM citizens
+      WHERE user_id=$1
+      `,
+      [req.params.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success:false,
+        message:"Citizen not found"
+      });
+    }
+
+    const c = result.rows[0];
+
+    res.json({
+      success:true,
+      citizen:{
+        ...c,
+        photo: c.photo
+          ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
+          : null,
+        aadhaar_card_image: c.aadhaar_card_image
+          ? `data:image/jpeg;base64,${Buffer.from(c.aadhaar_card_image).toString("base64")}`
+          : null,
+        pan_card_image: c.pan_card_image
+          ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
+          : null,
+      }
+    });
+
+  } catch(err){
+    console.error(err);
+    res.status(500).json({
+      success:false,
+      message:"Server Error"
+    });
+  }
+});
 // Update citizen verification status
 router.put("/:id/status", async (req, res) => {
     const { id } = req.params;

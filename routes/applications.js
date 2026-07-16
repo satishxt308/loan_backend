@@ -37,7 +37,7 @@ router.get('/applications', async (req, res) => {
 
     values.push(limit, offset);
 
-    const result = await db.query(query, values);
+    const result = await pool.query(query, values);
 
     // Get total count for pagination
     const countQuery = `
@@ -45,7 +45,7 @@ router.get('/applications', async (req, res) => {
       JOIN users u ON a.user_id = u.id
       ${whereClause}
     `;
-    const countResult = await db.query(countQuery, values.slice(0, -2));
+    const countResult = await pool.query(countQuery, values.slice(0, -2));
     const total = parseInt(countResult.rows[0].count);
 
     res.json({
@@ -81,7 +81,7 @@ router.patch('/applications/:applicationId/approve', async (req, res) => {
       RETURNING *
     `;
 
-    const result = await db.query(query, [applicationId]);
+    const result = await pool.query(query, [applicationId]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -106,6 +106,40 @@ router.patch('/applications/:applicationId/approve', async (req, res) => {
   }
 });
 
+router.get("/application-documents/:applicationId", async (req, res) => {
+  try {
+    const { applicationId } = req.params;
+
+    const result = await pool.query(
+      `SELECT *
+       FROM application_documents
+       WHERE application_id = $1
+       ORDER BY id ASC`,
+      [applicationId]
+    );
+
+    const data = result.rows.map(doc => ({
+      ...doc,
+      document_file: doc.document_file
+        ? `data:${doc.mime_type};base64,${doc.document_file.toString("base64")}`
+        : null
+    }));
+
+    res.json({
+      success: true,
+      count: data.length,
+      data
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 // Reject application
 router.patch('/applications/:applicationId/reject', async (req, res) => {
   try {
@@ -119,7 +153,7 @@ router.patch('/applications/:applicationId/reject', async (req, res) => {
       RETURNING *
     `;
 
-    const result = await db.query(query, [reason, applicationId]);
+    const result = await pool.query(query, [reason, applicationId]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({

@@ -120,6 +120,58 @@ router.post("/verify-otp", async (req, res) => {
   res.json({ success: true, verified: true });
 });
 
+router.put("/reset-password/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters.",
+      });
+    }
+
+    // Check user exists
+    const user = await pool.query(
+      "SELECT id FROM users WHERE id = $1",
+      [id]
+    );
+
+    if (user.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Student not found.",
+      });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Update password
+    await pool.query(
+      `UPDATE users
+       SET password = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [hashedPassword, id]
+    );
+
+    return res.json({
+      success: true,
+      message: "Password reset successfully.",
+    });
+
+  } catch (err) {
+    console.error("RESET PASSWORD ERROR:", err);
+
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+});
+
 // ===========================
 // CHECK EMAIL EXISTS
 // ===========================

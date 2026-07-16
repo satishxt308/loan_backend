@@ -332,35 +332,5 @@ router.post("/forgot-password", async (req, res) => {
     });
   }
 });
-
-router.post("/reset-password", async (req, res) => {
-  const { email, otp, newPassword, confirmPassword } = req.body;
-  const emailNormalized = email.toLowerCase();
-
-  if (newPassword !== confirmPassword) {
-    return res.status(400).json({ message: "Passwords do not match" });
-  }
-
-  const data = global.forgotOtpStore?.[emailNormalized];
-
-  if (!data || data.otp != otp) {
-    return res.status(400).json({ message: "Invalid OTP" });
-  }
-
-  if (Date.now() > data.expires) {
-    return res.status(400).json({ message: "OTP expired" });
-  }
-
-  const hashed = await bcrypt.hash(newPassword, 10);
-
-  await pool.query(
-    "UPDATE users SET password = $1 WHERE LOWER(email) = $2",
-    [hashed, emailNormalized]
-  );
-
-  delete global.forgotOtpStore[emailNormalized];
-
-  res.json({ success: true });
-});
  
 module.exports = router;
