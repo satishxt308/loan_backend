@@ -122,7 +122,6 @@ router.get("/employees/:id", async (req, res) => {
         u.id,
         u.full_name,
         u.email,
-        u.profile_image,
         u.phone_number,
         u.date_of_birth as dob,
         u.gender,
@@ -158,9 +157,6 @@ router.get("/employees/:id", async (req, res) => {
       full_name: emp.full_name,
       email: emp.email,
       phone: emp.phone_number,
-      profile_image: emp.profile_image
-  ? `data:image/png;base64,${emp.profile_image.toString("base64")}`
-  : null,
       dob: emp.dob,
       gender: emp.gender,
       status: emp.card_status || 'pending',
@@ -172,33 +168,6 @@ router.get("/employees/:id", async (req, res) => {
       full_address: emp.full_address,
       referral_source: emp.referral_source,
       emp_card_verified: emp.emp_card_verified,
-      // Add empty fields for other sections to match modal
-      passport_number: null,
-      driving_license: null,
-      department: null,
-      designation: null,
-      employment_type: null,
-      joining_date: null,
-      employee_status: 'active',
-      reporting_manager: null,
-      work_location: null,
-      shift_timing: null,
-      highest_qualification: null,
-      specialization: null,
-      university: null,
-      year_of_passing: null,
-      percentage: null,
-      previous_experience: null,
-      bank_name: null,
-      account_number: null,
-      ifsc_code: null,
-      upi_id: null,
-      emergency_contact_name: null,
-      emergency_contact_number: null,
-      emergency_relationship: null,
-      linkedin: null,
-      twitter: null,
-      github: null
     };
 
     res.json({
@@ -443,6 +412,33 @@ router.get("/employees/:id/can-verify", async (req, res) => {
 });
 
 // ==============================
+// GET EMPLOYEE PROFILE IMAGE
+// ==============================
+router.get("/employees/:id/profile-image", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `SELECT profile_image
+       FROM users
+       WHERE id = $1 AND role = 'employee'`,
+      [id]
+    );
+
+    if (result.rows.length === 0 || !result.rows[0].profile_image) {
+      return res.status(404).send("Image not found");
+    }
+
+    res.setHeader("Content-Type", "image/png");
+    res.send(result.rows[0].profile_image);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err.message);
+  }
+});
+
+// ==============================
 // GET EMPLOYEE DOCUMENTS
 // ==============================
 router.get("/employee-documents", async (req, res) => {
@@ -491,40 +487,24 @@ router.get("/employee-documents/:id", async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      `
-      SELECT
-          id,
-          base64_data
-      FROM emp_documents
-      WHERE id = $1
-      `,
+      `SELECT base64_data
+       FROM emp_documents
+       WHERE id = $1`,
       [id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Document not found",
-      });
+    if (result.rows.length === 0 || !result.rows[0].base64_data) {
+      return res.status(404).send("Document not found");
     }
 
-    const doc = result.rows[0];
+    const imageBuffer = Buffer.from(result.rows[0].base64_data, "base64");
 
-    res.json({
-      success: true,
-      data: {
-        id: doc.id,
-        document_file: doc.base64_data
-          ? `data:image/png;base64,${doc.base64_data.toString("base64")}`
-          : null,
-      },
-    });
+    res.setHeader("Content-Type", "image/png");
+    res.send(imageBuffer);
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    res.status(500).send(err.message);
   }
 });
 
