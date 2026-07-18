@@ -274,63 +274,6 @@ router.get("/status/:status", async (req, res) => {
 });
 
 // ============================================
-// 4. GET document by ID with validation
-// ============================================
-// GET citizen by ID
-router.get("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      `
-      SELECT
-        c.*,
-        u.full_name,
-        u.email
-      FROM citizens c
-      LEFT JOIN users u
-        ON u.id = c.user_id
-      WHERE c.id = $1
-      `,
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Citizen not found",
-      });
-    }
-
-    const c = result.rows[0];
-
-    res.json({
-      success: true,
-      data: {
-        ...c,
-
-        photo: c.photo
-          ? `data:image/jpeg;base64,${c.photo.toString("base64")}`
-          : null,
-
-        aadhaar_card_image: c.aadhaar_card_image
-          ? `data:image/jpeg;base64,${c.aadhaar_card_image.toString("base64")}`
-          : null,
-
-        pan_card_image: c.pan_card_image
-          ? `data:image/jpeg;base64,${c.pan_card_image.toString("base64")}`
-          : null,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
-});
-
-// ============================================
 // 5. GET documents by employee ID with validation
 // ============================================
 router.get("/employee/:employeeId", async (req, res) => {
@@ -821,6 +764,59 @@ router.get("/incomplete/mandatory", async (req, res) => {
             error: err.message
         });
     }
+});
+
+router.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      SELECT
+        c.*,
+        u.full_name,
+        u.email
+      FROM citizens c
+      LEFT JOIN users u
+        ON u.id = c.user_id
+      WHERE c.id = $1
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Citizen not found",
+      });
+    }
+
+    const c = result.rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        ...c,
+
+        photo: c.photo
+          ? `data:image/jpeg;base64,${c.photo.toString("base64")}`
+          : null,
+
+        aadhaar_card_image: c.aadhaar_card_image
+          ? `data:image/jpeg;base64,${c.aadhaar_card_image.toString("base64")}`
+          : null,
+
+        pan_card_image: c.pan_card_image
+          ? `data:image/jpeg;base64,${c.pan_card_image.toString("base64")}`
+          : null,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
 });
 
 module.exports = router;
