@@ -448,35 +448,32 @@ router.get("/employees/:id/can-verify", async (req, res) => {
 router.get("/employee-documents", async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT 
-        ed.id,
-        ed.user_id AS employee_id,
-        ed.document_type,
-        ed.base64_data AS document_file,
-        ed.status,
-        ed.reason AS rejection_reason,
-        ed.created_at AS uploaded_date,
-        ed.updated_at AS last_updated,
-        u.full_name AS employee_name
-      FROM emp_documents ed
-      LEFT JOIN users u ON u.id = ed.user_id
-      WHERE u.role = 'employee'
-      ORDER BY ed.id DESC
+      SELECT
+    ed.id,
+    ed.user_id AS employee_id,
+    ed.document_type,
+    ed.status,
+    ed.reason AS rejection_reason,
+    ed.created_at AS uploaded_date,
+    ed.updated_at AS last_updated,
+    u.full_name AS employee_name
+FROM emp_documents ed
+LEFT JOIN users u ON u.id = ed.user_id
+WHERE u.role = 'employee'
+ORDER BY ed.id DESC;
     `);
 
     const documents = result.rows.map(doc => ({
-      id: doc.id,
-      employee_id: doc.employee_id,
-      document_type: doc.document_type,
-      document_key: doc.document_type?.replace('_', ' ') || 'Document',
-      document_name: `${doc.document_type}_${doc.employee_id}`,
-      document_file: doc.document_file ? `data:image/png;base64,${doc.document_file.toString('base64')}` : null,
-      mime_type: 'image/png',
-      status: doc.status || 'pending',
-      rejection_reason: doc.rejection_reason,
-      uploaded_date: doc.uploaded_date,
-      last_updated: doc.last_updated
-    }));
+    id: doc.id,
+    employee_id: doc.employee_id,
+    document_type: doc.document_type,
+    document_key: doc.document_type?.replace('_', ' ') || 'Document',
+    document_name: `${doc.document_type}_${doc.employee_id}`,
+    status: doc.status || 'pending',
+    rejection_reason: doc.rejection_reason,
+    uploaded_date: doc.uploaded_date,
+    last_updated: doc.last_updated
+}));
 
     res.json({
       success: true,
@@ -486,6 +483,48 @@ router.get("/employee-documents", async (req, res) => {
   } catch (err) {
     console.error("❌ Fetch Documents Error:", err);
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get("/employee-documents/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      SELECT
+          id,
+          base64_data
+      FROM emp_documents
+      WHERE id = $1
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Document not found",
+      });
+    }
+
+    const doc = result.rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        id: doc.id,
+        document_file: doc.base64_data
+          ? `data:image/png;base64,${doc.base64_data.toString("base64")}`
+          : null,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 });
 
