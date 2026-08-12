@@ -333,4 +333,112 @@ router.post("/forgot-password", async (req, res) => {
   }
 });
  
+// ===========================
+// RESET PASSWORD WITH OTP
+// ===========================
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { email, otp, newPassword, confirmPassword } = req.body;
+
+    const emailNormalized = email?.trim().toLowerCase();
+    const otpInput = otp?.trim();
+
+    // Validate input
+    if (!emailNormalized || !otpInput || !newPassword || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required"
+      });
+    }
+
+    // Check password
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters"
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Passwords do not match"
+      });
+    }
+
+    // Get stored OTP
+    const record = global.forgotOtpStore?.[emailNormalized];
+
+    if (!record) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP not found. Please request a new OTP."
+      });
+    }
+
+    // Check expiry
+    if (Date.now() > record.expires) {
+      delete global.forgotOtpStore[emailNormalized];
+
+      return res.status(400).json({
+        success: false,
+        message: "OTP expired. Please request a new OTP."
+      });
+    }
+
+    // IMPORTANT:
+    // forgot-password generates OTP as Number,
+    // while React Native sends it as String.
+    if (String(record.otp) !== String(otpInput)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP"
+      });
+    }
+
+    // Check user
+    const user = await pool.query(
+      `SELECT id
+       FROM users
+       WHERE LOWER(email) = $1`,
+      [emailNormalized]
+    );
+
+    if (user.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await pool.query(
+      `UPDATE users
+       SET password = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [hashedPassword, user.rows[0].id]
+    );
+
+    // OTP can only be used once
+    delete global.forgotOtpStore[emailNormalized];
+
+    return res.json({
+      success: true,
+      message: "Password reset successfully"
+    });
+
+  } catch (error) {
+    console.error("RESET PASSWORD ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error. Please try again later."
+    });
+  }
+});
+
 module.exports = router;

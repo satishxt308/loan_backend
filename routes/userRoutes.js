@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/db");
 
-const { Resend } = require("resend"); 
+const { Resend } = require("resend");  
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 const bcrypt = require("bcryptjs");
