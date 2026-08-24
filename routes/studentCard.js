@@ -7,98 +7,127 @@ router.get("/student-card/:userId", async (req, res) => {
   const { userId } = req.params;
 
   try {
-   const result = await pool.query(
-  `
-SELECT
-  u.id AS user_id,
-  u.full_name,
-  u.student_id,
-  u.date_of_birth,
-  u.gender,
-  u.email,
-  u.phone_number,
-  a.id AS application_id,
-ad.document_file,
-ad.mime_type,
-  u.guard_card,
-  u.is_active,
+    const result = await pool.query(
+      `
+      SELECT
+        u.id AS user_id,
+        u.full_name,
+        u.student_id,
+        u.date_of_birth,
+        u.gender,
+        u.email,
+        u.phone_number,
 
-  a.category,
-  a.aadhaar_number,
-  a.full_address AS address,   -- ✅ FIXED (from applications)
-  a.guardian_name,
-  a.guardian_aadhaar,
-  a.guardian_pan,
-  a.college_name,
-  a.degree,
-  a.year,
+        -- PROFILE IMAGE FROM USERS TABLE
+        u.profile_image,
 
-  g.id AS guardian_id,
-  g.name AS guardian_name_full,
-  g.phone AS guardian_phone,
-  g.relation,
-  g.occupation,
-  g.aadhaar_number AS guardian_aadhaar_number,
-  g.pan_number AS guardian_pan_number,
-  g.address AS guardian_address,
-  g.status AS guardian_status,
+        a.id AS application_id,
 
-  p.created_at AS payment_date,  -- ✅ PAYMENT DATE
-  p.created_at + INTERVAL '1 year' AS valid_until  -- ✅ EXPIRY
+        -- PROFILE IMAGE FROM APPLICATION DOCUMENTS
+        ad.document_file,
+        ad.mime_type,
 
-FROM users u
+        u.guard_card,
+        u.is_active,
 
--- ✅ ONLY APPROVED APPLICATION
-LEFT JOIN LATERAL (
-  SELECT *
-  FROM applications
-  WHERE user_id = u.id
-    AND status = 'approved'
-  ORDER BY submitted_date DESC
-  LIMIT 1
-) a ON true
+        a.category,
+        a.aadhaar_number,
+        a.full_address AS address,
+        a.guardian_name,
+        a.guardian_aadhaar,
+        a.guardian_pan,
+        a.college_name,
+        a.degree,
+        a.year,
 
-LEFT JOIN application_documents ad
-  ON ad.application_id = a.id
- AND ad.document_key = 'own_image'
+        g.id AS guardian_id,
+        g.name AS guardian_name_full,
+        g.phone AS guardian_phone,
+        g.relation,
+        g.occupation,
+        g.aadhaar_number AS guardian_aadhaar_number,
+        g.pan_number AS guardian_pan_number,
+        g.address AS guardian_address,
+        g.status AS guardian_status,
 
-LEFT JOIN guardians g
-  ON g.student_id = u.id
- AND g.status = 'approved'
- LEFT JOIN LATERAL (
-  SELECT created_at
-  FROM payments
-  WHERE user_id = u.id
-    AND status = 'approved'
-  ORDER BY created_at DESC
-  LIMIT 1
-) p ON true
+        p.created_at AS payment_date,
+        p.created_at + INTERVAL '1 year' AS valid_until
 
-WHERE u.id = $1
-  `,
-  [userId]
-);
+      FROM users u
+
+      -- ONLY APPROVED APPLICATION
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM applications
+        WHERE user_id = u.id
+          AND status = 'approved'
+        ORDER BY submitted_date DESC
+        LIMIT 1
+      ) a ON true
+
+      -- APPLICATION PROFILE IMAGE
+      LEFT JOIN application_documents ad
+        ON ad.application_id = a.id
+       AND ad.document_key = 'own_image'
+
+      LEFT JOIN guardians g
+        ON g.student_id = u.id
+       AND g.status = 'approved'
+
+      LEFT JOIN LATERAL (
+        SELECT created_at
+        FROM payments
+        WHERE user_id = u.id
+          AND status = 'approved'
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) p ON true
+
+      WHERE u.id = $1
+      `,
+      [userId]
+    );
 
     if (result.rows.length === 0 || !result.rows[0].student_id) {
-      return res.status(404).json({ message: "Student data not found" });
+      return res.status(404).json({
+        message: "Student data not found",
+      });
     }
 
     const user = result.rows[0];
 
-    if (user.document_file) {
-  user.profile_image = `data:${user.mime_type};base64,${user.document_file.toString("base64")}`;
-} else {
-  user.profile_image = null;
-}
+    /*
+     * ==========================================
+     * PROFILE IMAGE
+     * ==========================================
+     *
+     * Priority:
+     * 1. users.profile_image
+     * 2. application_documents own_image
+     */
 
-delete user.document_file;
-delete user.mime_type;
+    if (user.profile_image) {
+      user.profile_image =
+        `data:image/jpeg;base64,${user.profile_image.toString("base64")}`;
+    } else if (user.document_file) {
+      user.profile_image =
+        `data:${user.mime_type || "image/jpeg"};base64,${user.document_file.toString("base64")}`;
+    } else {
+      user.profile_image = null;
+    }
+
+    // Don't send raw BYTEA fields
+    delete user.document_file;
+    delete user.mime_type;
 
     res.json(user);
 
   } catch (err) {
     console.error("Student card error:", err);
-    res.status(500).json({ message: "Server error" });
+
+    res.status(500).json({
+      message: "Server error",
+    });
   }
 });
 
