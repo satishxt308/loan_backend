@@ -277,19 +277,14 @@ router.get("/employee/:id", async (req, res) => {
 });
 
 // ======================================================
-// Get citizen by ID - WITH family members
+// Get citizen by userId - WITH family members
 // ======================================================
-router.get("/:id", async (req, res) => {
+router.get("/citizen/:userId", async (req, res) => {
     try {
-        const result = await pool.query(`
-            SELECT
-                c.*,
-                u.full_name as employee_name,
-                u.phone_number as employee_phone
-            FROM citizens c
-            LEFT JOIN users u ON c.employee_id = u.id
-            WHERE c.id = $1
-        `, [req.params.id]);
+        const result = await pool.query(
+            `SELECT * FROM citizens WHERE user_id = $1`,
+            [req.params.userId]
+        );
 
         if (result.rows.length === 0) {
             return res.status(404).json({
@@ -298,34 +293,120 @@ router.get("/:id", async (req, res) => {
             });
         }
 
-        const citizen = {
-            ...result.rows[0],
-            photo: result.rows[0].photo
-                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].photo).toString("base64")}`
+        const c = result.rows[0];
+
+        const base = {
+            ...c,
+            photo: c.photo
+                ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
                 : null,
-            aadhaar_card_image: result.rows[0].aadhaar_card_image
-                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].aadhaar_card_image).toString("base64")}`
+            aadhaar_card_image: c.aadhaar_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(c.aadhaar_card_image).toString("base64")}`
                 : null,
-            pan_card_image: result.rows[0].pan_card_image
-                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].pan_card_image).toString("base64")}`
-                : null
+            pan_card_image: c.pan_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
+                : null,
         };
 
-        const [withFamily] = await attachFamilyMembers([citizen]);
+        const [withFamily] = await attachFamilyMembers([base]);
 
         res.json({
             success: true,
-            data: withFamily
+            citizen: withFamily
         });
 
     } catch (err) {
-        console.error("Error fetching citizen:", err);
+        console.error(err);
         res.status(500).json({
             success: false,
             message: "Server Error"
         });
     }
 });
+
+// ======================================================
+// Get citizen statistics
+// ======================================================
+router.get("/stats/:employeeId", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT
+                COUNT(*) as total,
+                COUNT(CASE WHEN verification_status = 'pending' THEN 1 END) as pending,
+                COUNT(CASE WHEN verification_status = 'approved' THEN 1 END) as approved,
+                COUNT(CASE WHEN verification_status = 'rejected' THEN 1 END) as rejected
+            FROM citizens
+            WHERE employee_id = $1
+        `, [req.params.employeeId]);
+
+        res.json({
+            success: true,
+            data: result.rows[0]
+        });
+
+    } catch (err) {
+        console.error("Error fetching citizen stats:", err);
+        res.status(500).json({
+            success: false,
+            message: "Server Error"
+        });
+    }
+});
+
+// ======================================================
+// Update citizen verification status
+// ======================================================
+router.put("/:id/status", async (req, res) => {
+    const { id } = req.params;
+    const { verification_status, rejection_reason } = req.body;
+
+    try {
+        const result = await pool.query(`
+            UPDATE citizens
+            SET verification_status = $1,
+                rejection_reason = $2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3
+            RETURNING *
+        `, [verification_status, rejection_reason, id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Citizen not found"
+            });
+        }
+
+        // If approved, update user role if user exists
+        if (verification_status === 'approved') {
+            const userCheck = await pool.query(
+                `SELECT id FROM users WHERE phone_number = $1`,
+                [result.rows[0].phone]
+            );
+
+            if (userCheck.rows.length > 0) {
+                await pool.query(
+                    `UPDATE users SET role = 'citizen' WHERE id = $1`,
+                    [userCheck.rows[0].id]
+                );
+            }
+        }
+
+        res.json({
+            success: true,
+            data: result.rows[0],
+            message: `Citizen ${verification_status} successfully`
+        });
+
+    } catch (err) {
+        console.error("Error updating citizen status:", err);
+        res.status(500).json({
+            success: false,
+            message: "Server Error"
+        });
+    }
+});
+
 
 // ======================================================
 // Update citizen - also replace family members
@@ -458,108 +539,6 @@ router.put("/:id", async (req, res) => {
 });
 
 // ======================================================
-// Get citizen by userId - WITH family members
-// ======================================================
-router.get("/citizen/:userId", async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT * FROM citizens WHERE user_id = $1`,
-            [req.params.userId]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Citizen not found"
-            });
-        }
-
-        const c = result.rows[0];
-
-        const base = {
-            ...c,
-            photo: c.photo
-                ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
-                : null,
-            aadhaar_card_image: c.aadhaar_card_image
-                ? `data:image/jpeg;base64,${Buffer.from(c.aadhaar_card_image).toString("base64")}`
-                : null,
-            pan_card_image: c.pan_card_image
-                ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
-                : null,
-        };
-
-        const [withFamily] = await attachFamilyMembers([base]);
-
-        res.json({
-            success: true,
-            citizen: withFamily
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({
-            success: false,
-            message: "Server Error"
-        });
-    }
-});
-
-// ======================================================
-// Update citizen verification status
-// ======================================================
-router.put("/:id/status", async (req, res) => {
-    const { id } = req.params;
-    const { verification_status, rejection_reason } = req.body;
-
-    try {
-        const result = await pool.query(`
-            UPDATE citizens
-            SET verification_status = $1,
-                rejection_reason = $2,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $3
-            RETURNING *
-        `, [verification_status, rejection_reason, id]);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Citizen not found"
-            });
-        }
-
-        // If approved, update user role if user exists
-        if (verification_status === 'approved') {
-            const userCheck = await pool.query(
-                `SELECT id FROM users WHERE phone_number = $1`,
-                [result.rows[0].phone]
-            );
-
-            if (userCheck.rows.length > 0) {
-                await pool.query(
-                    `UPDATE users SET role = 'citizen' WHERE id = $1`,
-                    [userCheck.rows[0].id]
-                );
-            }
-        }
-
-        res.json({
-            success: true,
-            data: result.rows[0],
-            message: `Citizen ${verification_status} successfully`
-        });
-
-    } catch (err) {
-        console.error("Error updating citizen status:", err);
-        res.status(500).json({
-            success: false,
-            message: "Server Error"
-        });
-    }
-});
-
-// ======================================================
 // Delete citizen
 // ======================================================
 router.delete("/:id", async (req, res) => {
@@ -622,27 +601,49 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ======================================================
-// Get citizen statistics
+// Get citizen by ID - WITH family members
 // ======================================================
-router.get("/stats/:employeeId", async (req, res) => {
+router.get("/:id", async (req, res) => {
     try {
         const result = await pool.query(`
             SELECT
-                COUNT(*) as total,
-                COUNT(CASE WHEN verification_status = 'pending' THEN 1 END) as pending,
-                COUNT(CASE WHEN verification_status = 'approved' THEN 1 END) as approved,
-                COUNT(CASE WHEN verification_status = 'rejected' THEN 1 END) as rejected
-            FROM citizens
-            WHERE employee_id = $1
-        `, [req.params.employeeId]);
+                c.*,
+                u.full_name as employee_name,
+                u.phone_number as employee_phone
+            FROM citizens c
+            LEFT JOIN users u ON c.employee_id = u.id
+            WHERE c.id = $1
+        `, [req.params.id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Citizen not found"
+            });
+        }
+
+        const citizen = {
+            ...result.rows[0],
+            photo: result.rows[0].photo
+                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].photo).toString("base64")}`
+                : null,
+            aadhaar_card_image: result.rows[0].aadhaar_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].aadhaar_card_image).toString("base64")}`
+                : null,
+            pan_card_image: result.rows[0].pan_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(result.rows[0].pan_card_image).toString("base64")}`
+                : null
+        };
+
+        const [withFamily] = await attachFamilyMembers([citizen]);
 
         res.json({
             success: true,
-            data: result.rows[0]
+            data: withFamily
         });
 
     } catch (err) {
-        console.error("Error fetching citizen stats:", err);
+        console.error("Error fetching citizen:", err);
         res.status(500).json({
             success: false,
             message: "Server Error"
