@@ -599,9 +599,10 @@ router.get("/status/:citizenId", async (req, res) => {
     const { citizenId } = req.params;
 
     const query = `
-      SELECT 
+      SELECT
         id,
         amount,
+        payment_type,
         payment_method,
         utr,
         status,
@@ -620,14 +621,19 @@ router.get("/status/:citizenId", async (req, res) => {
       return res.json({
         success: true,
         hasPayment: false,
+        payment_status: null,
         message: "No payment found for this citizen",
       });
     }
 
+    const payment = result.rows[0];
+
     res.json({
       success: true,
       hasPayment: true,
-      payment: result.rows[0],
+      // Return BOTH formats so existing frontend keeps working
+      payment_status: payment.status ? payment.status.toLowerCase() : null,
+      payment,
     });
 
   } catch (error) {
