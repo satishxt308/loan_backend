@@ -14,28 +14,66 @@ const convertImage = (img) => {
 // Helper function to check if photo is mandatory and present
 const validateMandatoryDocuments = (citizen) => {
     const missingDocs = [];
-    
+
     // Photo is MANDATORY - check in citizens table
     if (!citizen.photo) {
         missingDocs.push('photo');
     }
-    
+
     // Aadhaar is MANDATORY
     if (!citizen.aadhaar_number) {
         missingDocs.push('aadhaar');
     }
-    
+
     return {
         isValid: missingDocs.length === 0,
         missingDocs: missingDocs,
-        message: missingDocs.length > 0 
-            ? `Missing mandatory documents: ${missingDocs.join(', ')}` 
+        message: missingDocs.length > 0
+            ? `Missing mandatory documents: ${missingDocs.join(', ')}`
             : 'All mandatory documents present'
     };
 };
 
 // ============================================
-// 1. GET all citizen documents with photo validation
+// Helper: Attach family members to citizens (batched, no N+1)
+// ============================================
+const attachFamilyMembers = async (citizenRows) => {
+    if (!Array.isArray(citizenRows)) citizenRows = [citizenRows];
+    if (citizenRows.length === 0) return citizenRows;
+
+    const citizenIds = citizenRows.map(c => c.id);
+
+    const fmResult = await pool.query(
+        `SELECT id, citizen_id, member_number, name, relation, age, photo
+         FROM family_members
+         WHERE citizen_id = ANY($1::int[])
+         ORDER BY citizen_id, member_number`,
+        [citizenIds]
+    );
+
+    const grouped = {};
+    for (const row of fmResult.rows) {
+        if (!grouped[row.citizen_id]) grouped[row.citizen_id] = [];
+        grouped[row.citizen_id].push({
+            id: row.id,
+            member_number: row.member_number,
+            name: row.name,
+            relation: row.relation,
+            age: row.age,
+            photo: row.photo
+                ? `data:image/jpeg;base64,${Buffer.from(row.photo).toString("base64")}`
+                : null,
+        });
+    }
+
+    return citizenRows.map(c => ({
+        ...c,
+        family_members: grouped[c.id] || [],
+    }));
+};
+
+// ============================================
+// 1. GET all citizen documents with photo validation + family members
 // ============================================
 router.get("/", async (req, res) => {
     try {
@@ -50,7 +88,7 @@ router.get("/", async (req, res) => {
             ORDER BY c.created_at DESC
         `);
 
-        const data = result.rows.map(c => ({
+        const mapped = result.rows.map(c => ({
             ...c,
 
             photo: c.photo
@@ -66,12 +104,16 @@ router.get("/", async (req, res) => {
                 : null,
         }));
 
+        // Attach family members
+        const data = await attachFamilyMembers(mapped);
+
         res.json({
             success: true,
             data
         });
 
     } catch (err) {
+        console.error("Error fetching all citizen documents:", err);
         res.status(500).json({
             success: false,
             error: err.message
@@ -80,15 +122,15 @@ router.get("/", async (req, res) => {
 });
 
 // ============================================
-// 2. GET documents by citizen ID with photo validation
+// 2. GET documents by citizen ID with photo validation + family members
 // ============================================
 router.get("/citizen/:citizenId", async (req, res) => {
     try {
         const { citizenId } = req.params;
-        
+
         // First, check if citizen exists and has mandatory documents
         const citizenCheck = await pool.query(`
-            SELECT 
+            SELECT
                 id,
                 name,
                 phone,
@@ -114,9 +156,8 @@ router.get("/citizen/:citizenId", async (req, res) => {
 
         // If photo is missing, return warning
         if (!validation.isValid) {
-            // Still fetch documents but with warning
             const docResult = await pool.query(`
-                SELECT 
+                SELECT
                     cd.*,
                     c.name as citizen_name,
                     c.phone as citizen_phone
@@ -133,6 +174,9 @@ router.get("/citizen/:citizenId", async (req, res) => {
                     : null
             }));
 
+            // Still attach family members even on warning
+            const [citizenWithFamily] = await attachFamilyMembers([citizen]);
+
             return res.status(400).json({
                 success: false,
                 message: validation.message,
@@ -142,7 +186,10 @@ router.get("/citizen/:citizenId", async (req, res) => {
                     name: citizen.name,
                     has_photo: citizen.photo !== null,
                     has_aadhaar: citizen.aadhaar_number !== null && citizen.aadhaar_number !== '',
-                    verification_status: citizen.verification_status
+                    verification_status: citizen.verification_status,
+                    want_family_development_card: citizenWithFamily.want_family_development_card,
+                    family_member_count: citizenWithFamily.family_member_count,
+                    family_members: citizenWithFamily.family_members,
                 },
                 documents: documents,
                 missing_documents: validation.missingDocs
@@ -151,7 +198,7 @@ router.get("/citizen/:citizenId", async (req, res) => {
 
         // If all mandatory documents are present, fetch all documents
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 cd.*,
                 c.name as citizen_name,
                 c.phone as citizen_phone,
@@ -182,6 +229,9 @@ router.get("/citizen/:citizenId", async (req, res) => {
                 : null
         }));
 
+        // Attach family members to citizen_info
+        const [citizenWithFamily] = await attachFamilyMembers([citizen]);
+
         res.json({
             success: true,
             message: "Documents fetched successfully",
@@ -190,7 +240,10 @@ router.get("/citizen/:citizenId", async (req, res) => {
                 name: citizen.name,
                 has_photo: true,
                 has_aadhaar: true,
-                verification_status: citizen.verification_status
+                verification_status: citizen.verification_status,
+                want_family_development_card: citizenWithFamily.want_family_development_card,
+                family_member_count: citizenWithFamily.family_member_count,
+                family_members: citizenWithFamily.family_members,
             },
             data: documents,
             count: documents.length,
@@ -213,9 +266,9 @@ router.get("/citizen/:citizenId", async (req, res) => {
 router.get("/status/:status", async (req, res) => {
     try {
         const { status } = req.params;
-        
+
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 cd.*,
                 c.id as citizen_id,
                 c.name as citizen_name,
@@ -247,7 +300,6 @@ router.get("/status/:status", async (req, res) => {
             is_photo_mandatory: true
         }));
 
-        // Filter out documents without photo if status is approved
         let filteredDocs = documents;
         if (status === 'approved') {
             filteredDocs = documents.filter(d => d.has_photo);
@@ -258,8 +310,8 @@ router.get("/status/:status", async (req, res) => {
             data: filteredDocs,
             count: filteredDocs.length,
             total_without_photo: documents.filter(d => !d.has_photo).length,
-            message: status === 'approved' 
-                ? "Only showing approved documents with mandatory photo" 
+            message: status === 'approved'
+                ? "Only showing approved documents with mandatory photo"
                 : `Documents with status: ${status}`
         });
 
@@ -279,9 +331,9 @@ router.get("/status/:status", async (req, res) => {
 router.get("/employee/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
-        
+
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 cd.*,
                 c.id as citizen_id,
                 c.name as citizen_name,
@@ -343,7 +395,7 @@ router.get("/employee/:employeeId", async (req, res) => {
 router.get("/stats/all", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 COUNT(DISTINCT cd.id) as total_documents,
                 COUNT(DISTINCT cd.citizen_id) as total_citizens,
                 COUNT(CASE WHEN cd.status = 'pending' THEN 1 END) as pending,
@@ -357,19 +409,27 @@ router.get("/stats/all", async (req, res) => {
         `);
 
         const stats = result.rows[0];
-        
-        // Calculate completion percentage
+
         const totalCitizens = parseInt(stats.total_citizens) || 0;
         const withPhoto = parseInt(stats.citizens_with_photo) || 0;
-        const completionRate = totalCitizens > 0 
-            ? Math.round((withPhoto / totalCitizens) * 100) 
+        const completionRate = totalCitizens > 0
+            ? Math.round((withPhoto / totalCitizens) * 100)
             : 0;
+
+        // NEW: Family card stats
+        const familyStats = await pool.query(`
+            SELECT
+                COUNT(CASE WHEN want_family_development_card = true THEN 1 END) as family_card_citizens,
+                COUNT(CASE WHEN want_family_development_card = true THEN 1 END) as total_family_cards
+            FROM citizens
+        `);
 
         res.json({
             success: true,
             data: {
                 ...stats,
                 photo_completion_rate: `${completionRate}%`,
+                ...familyStats.rows[0],
                 mandatory_documents: {
                     photo: {
                         required: true,
@@ -416,7 +476,6 @@ router.post("/", async (req, res) => {
         });
     }
 
-    // Check if citizen exists and has photo
     const citizenCheck = await pool.query(
         `SELECT id, photo, aadhaar_number FROM citizens WHERE id = $1`,
         [citizen_id]
@@ -430,10 +489,8 @@ router.post("/", async (req, res) => {
     }
 
     const citizen = citizenCheck.rows[0];
-
-    // Validate mandatory documents
     const validation = validateMandatoryDocuments(citizen);
-    
+
     if (!validation.isValid) {
         return res.status(400).json({
             success: false,
@@ -501,9 +558,8 @@ router.put("/:id", async (req, res) => {
     }
 
     try {
-        // Get document and check citizen's mandatory documents
         const docCheck = await pool.query(`
-            SELECT cd.*, c.photo, c.aadhaar_number 
+            SELECT cd.*, c.photo, c.aadhaar_number
             FROM citizen_documents cd
             LEFT JOIN citizens c ON cd.citizen_id = c.id
             WHERE cd.id = $1
@@ -519,7 +575,6 @@ router.put("/:id", async (req, res) => {
         const doc = docCheck.rows[0];
         const validation = validateMandatoryDocuments(doc);
 
-        // If approving, check mandatory documents
         if (status === 'approved' && !validation.isValid) {
             return res.status(400).json({
                 success: false,
@@ -530,8 +585,8 @@ router.put("/:id", async (req, res) => {
         }
 
         const result = await pool.query(`
-            UPDATE citizen_documents 
-            SET status = $1, 
+            UPDATE citizen_documents
+            SET status = $1,
                 rejection_reason = $2,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $3
@@ -583,10 +638,9 @@ router.put("/bulk/update", async (req, res) => {
     }
 
     try {
-        // Check all documents have mandatory documents if approving
         if (status === 'approved') {
             const checkResult = await pool.query(`
-                SELECT 
+                SELECT
                     cd.id,
                     c.id as citizen_id,
                     c.photo,
@@ -596,7 +650,7 @@ router.put("/bulk/update", async (req, res) => {
                 WHERE cd.id = ANY($1::int[])
             `, [ids]);
 
-            const invalidDocs = checkResult.rows.filter(row => 
+            const invalidDocs = checkResult.rows.filter(row =>
                 !row.photo || !row.aadhaar_number
             );
 
@@ -614,8 +668,8 @@ router.put("/bulk/update", async (req, res) => {
         }
 
         const result = await pool.query(`
-            UPDATE citizen_documents 
-            SET status = $1, 
+            UPDATE citizen_documents
+            SET status = $1,
                 rejection_reason = $2,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ANY($3::int[])
@@ -652,9 +706,9 @@ router.put("/bulk/update", async (req, res) => {
 router.get("/search/:query", async (req, res) => {
     try {
         const { query } = req.params;
-        
+
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 cd.*,
                 c.id as citizen_id,
                 c.name as citizen_name,
@@ -671,7 +725,7 @@ router.get("/search/:query", async (req, res) => {
             FROM citizen_documents cd
             LEFT JOIN citizens c ON cd.citizen_id = c.id
             LEFT JOIN users u ON c.user_id = u.id
-            WHERE c.name ILIKE $1 
+            WHERE c.name ILIKE $1
                OR cd.document_key ILIKE $1
                OR cd.document_type ILIKE $1
                OR c.aadhaar_number ILIKE $1
@@ -720,7 +774,7 @@ router.get("/search/:query", async (req, res) => {
 router.get("/incomplete/mandatory", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 c.id,
                 c.name,
                 c.phone,
@@ -731,8 +785,8 @@ router.get("/incomplete/mandatory", async (req, res) => {
                 COUNT(cd.id) as total_documents
             FROM citizens c
             LEFT JOIN citizen_documents cd ON c.id = cd.citizen_id
-            WHERE c.photo IS NULL 
-               OR c.aadhaar_number IS NULL 
+            WHERE c.photo IS NULL
+               OR c.aadhaar_number IS NULL
                OR c.aadhaar_number = ''
             GROUP BY c.id
             ORDER BY c.created_at DESC
@@ -766,57 +820,63 @@ router.get("/incomplete/mandatory", async (req, res) => {
     }
 });
 
+// ============================================
+// 12. Get single citizen by ID + family members
+//    (MUST be LAST — matches any string)
+// ============================================
 router.get("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
+    try {
+        const { id } = req.params;
 
-    const result = await pool.query(
-      `
-      SELECT
-        c.*,
-        u.full_name,
-        u.email
-      FROM citizens c
-      LEFT JOIN users u
-        ON u.id = c.user_id
-      WHERE c.id = $1
-      `,
-      [id]
-    );
+        const result = await pool.query(
+            `
+            SELECT
+                c.*,
+                u.full_name,
+                u.email
+            FROM citizens c
+            LEFT JOIN users u
+                ON u.id = c.user_id
+            WHERE c.id = $1
+            `,
+            [id]
+        );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Citizen not found",
-      });
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Citizen not found",
+            });
+        }
+
+        const c = result.rows[0];
+
+        const base = {
+            ...c,
+            photo: c.photo
+                ? `data:image/jpeg;base64,${c.photo.toString("base64")}`
+                : null,
+            aadhaar_card_image: c.aadhaar_card_image
+                ? `data:image/jpeg;base64,${c.aadhaar_card_image.toString("base64")}`
+                : null,
+            pan_card_image: c.pan_card_image
+                ? `data:image/jpeg;base64,${c.pan_card_image.toString("base64")}`
+                : null,
+        };
+
+        const [withFamily] = await attachFamilyMembers([base]);
+
+        res.json({
+            success: true,
+            data: withFamily,
+        });
+    } catch (err) {
+        console.error("Error fetching single citizen:", err);
+        res.status(500).json({
+            success: false,
+            message: err.message,
+        });
     }
-
-    const c = result.rows[0];
-
-    res.json({
-      success: true,
-      data: {
-        ...c,
-
-        photo: c.photo
-          ? `data:image/jpeg;base64,${c.photo.toString("base64")}`
-          : null,
-
-        aadhaar_card_image: c.aadhaar_card_image
-          ? `data:image/jpeg;base64,${c.aadhaar_card_image.toString("base64")}`
-          : null,
-
-        pan_card_image: c.pan_card_image
-          ? `data:image/jpeg;base64,${c.pan_card_image.toString("base64")}`
-          : null,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
 });
 
 module.exports = router;
