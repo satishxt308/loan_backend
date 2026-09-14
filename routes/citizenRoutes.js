@@ -11,7 +11,45 @@ const convertImage = (img) => {
     );
 };
 
-// Add citizen
+// Helper: attach family members to a citizen row (with base64 photos)
+const attachFamilyMembers = async (citizens, clientOrPool = pool) => {
+    if (!Array.isArray(citizens)) citizens = [citizens];
+    if (citizens.length === 0) return citizens;
+
+    const citizenIds = citizens.map(c => c.id);
+
+    const fmResult = await clientOrPool.query(
+        `SELECT id, citizen_id, member_number, name, relation, age, photo
+         FROM family_members
+         WHERE citizen_id = ANY($1::int[])
+         ORDER BY citizen_id, member_number`,
+        [citizenIds]
+    );
+
+    const grouped = {};
+    for (const row of fmResult.rows) {
+        if (!grouped[row.citizen_id]) grouped[row.citizen_id] = [];
+        grouped[row.citizen_id].push({
+            id: row.id,
+            member_number: row.member_number,
+            name: row.name,
+            relation: row.relation,
+            age: row.age,
+            photo: row.photo
+                ? `data:image/jpeg;base64,${Buffer.from(row.photo).toString("base64")}`
+                : null,
+        });
+    }
+
+    return citizens.map(c => ({
+        ...c,
+        family_members: grouped[c.id] || [],
+    }));
+};
+
+// ======================================================
+// Add citizen (with optional family members)
+// ======================================================
 router.post("/add", async (req, res) => {
     const client = await pool.connect();
 
@@ -32,7 +70,11 @@ router.post("/add", async (req, res) => {
             photo,
             aadhaarCardImage,
             panCardImage,
-            employeeId
+            employeeId,
+            // NEW
+            wantFamilyDevelopmentCard,
+            familyMemberCount,
+            familyMembers,
         } = req.body;
 
         const photoBuffer = convertImage(photo);
@@ -80,31 +122,63 @@ router.post("/add", async (req, res) => {
 
         const userId = user.rows[0].id;
 
-        // Insert into citizens
-        await client.query(
+        // Insert into citizens (with family card flags)
+        const citizenResult = await client.query(
             `
             INSERT INTO citizens
-            (user_id, employee_id, name, date_of_birth, age,nominee_name, address, phone, 
+            (user_id, employee_id, name, date_of_birth, age, nominee_name, address, phone,
              gender, occupation, annual_income, aadhaar_number, pan_number,
-             photo, aadhaar_card_image, pan_card_image, verification_status)
+             photo, aadhaar_card_image, pan_card_image, verification_status,
+             want_family_development_card, family_member_count)
             VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14, $15,
-    $16, 'pending'
-)
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15,
+                $16, 'pending', $17, $18
+            )
+            RETURNING id
             `,
             [
                 userId, employeeId, name, dateOfBirth, age, nomineeName, address, phone,
                 gender, occupation, annualIncome, aadhaarNumber, panNumber,
-                photoBuffer, aadhaarBuffer, panBuffer
+                photoBuffer, aadhaarBuffer, panBuffer,
+                wantFamilyDevelopmentCard === true,
+                wantFamilyDevelopmentCard ? (familyMemberCount || null) : null,
             ]
         );
+
+        const citizenId = citizenResult.rows[0].id;
+
+        // Insert family members if present
+        if (
+            wantFamilyDevelopmentCard === true &&
+            Array.isArray(familyMembers) &&
+            familyMembers.length > 0
+        ) {
+            for (let i = 0; i < familyMembers.length; i++) {
+                const m = familyMembers[i];
+                const memberPhotoBuffer = convertImage(m.photo);
+                await client.query(
+                    `INSERT INTO family_members
+                     (citizen_id, member_number, name, relation, age, photo)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        citizenId,
+                        m.memberNumber || (i + 1),
+                        m.name,
+                        m.relation,
+                        m.age,
+                        memberPhotoBuffer,
+                    ]
+                );
+            }
+        }
 
         await client.query("COMMIT");
 
         res.json({
             success: true,
-            message: "Citizen registered successfully"
+            message: "Citizen registered successfully",
+            citizenId,
         });
 
     } catch (err) {
@@ -119,11 +193,13 @@ router.post("/add", async (req, res) => {
     }
 });
 
-// Get all citizens (for admin)
+// ======================================================
+// Get all citizens (for admin) - WITH family members
+// ======================================================
 router.get("/all", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 c.*,
                 u.full_name as employee_name,
                 u.phone_number as employee_phone
@@ -132,7 +208,7 @@ router.get("/all", async (req, res) => {
             ORDER BY c.created_at DESC
         `);
 
-        const citizens = result.rows.map(c => ({
+        const mapped = result.rows.map(c => ({
             ...c,
             photo: c.photo
                 ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
@@ -144,6 +220,8 @@ router.get("/all", async (req, res) => {
                 ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
                 : null
         }));
+
+        const citizens = await attachFamilyMembers(mapped);
 
         res.json({
             success: true,
@@ -159,7 +237,9 @@ router.get("/all", async (req, res) => {
     }
 });
 
-// Get citizens by employee ID
+// ======================================================
+// Get citizens by employee ID - WITH family members
+// ======================================================
 router.get("/employee/:id", async (req, res) => {
     try {
         const result = await pool.query(
@@ -167,7 +247,7 @@ router.get("/employee/:id", async (req, res) => {
             [req.params.id]
         );
 
-        const citizens = result.rows.map(c => ({
+        const mapped = result.rows.map(c => ({
             ...c,
             photo: c.photo
                 ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
@@ -179,6 +259,8 @@ router.get("/employee/:id", async (req, res) => {
                 ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
                 : null
         }));
+
+        const citizens = await attachFamilyMembers(mapped);
 
         res.json({
             success: true,
@@ -194,11 +276,13 @@ router.get("/employee/:id", async (req, res) => {
     }
 });
 
-// Get citizen by ID with documents
+// ======================================================
+// Get citizen by ID - WITH family members
+// ======================================================
 router.get("/:id", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 c.*,
                 u.full_name as employee_name,
                 u.phone_number as employee_phone
@@ -227,9 +311,11 @@ router.get("/:id", async (req, res) => {
                 : null
         };
 
+        const [withFamily] = await attachFamilyMembers([citizen]);
+
         res.json({
             success: true,
-            data: citizen
+            data: withFamily
         });
 
     } catch (err) {
@@ -241,7 +327,9 @@ router.get("/:id", async (req, res) => {
     }
 });
 
-// Update citizen
+// ======================================================
+// Update citizen - also replace family members
+// ======================================================
 router.put("/:id", async (req, res) => {
     const client = await pool.connect();
 
@@ -278,7 +366,11 @@ router.put("/:id", async (req, res) => {
             panNumber,
             photo,
             aadhaarCardImage,
-            panCardImage
+            panCardImage,
+            // NEW
+            wantFamilyDevelopmentCard,
+            familyMemberCount,
+            familyMembers,
         } = req.body;
 
         const photoBuffer = convertImage(photo);
@@ -293,23 +385,58 @@ router.put("/:id", async (req, res) => {
             [name, dateOfBirth, gender, phone, userId]
         );
 
-        // Update citizens table
+        // Update citizens table (with family flags)
         await client.query(
             `UPDATE citizens
-             SET name = $1, date_of_birth = $2, age = $3, nominee_name =$4, address = $5, phone = $6,
+             SET name = $1, date_of_birth = $2, age = $3, nominee_name = $4,
+                 address = $5, phone = $6,
                  gender = $7, occupation = $8, annual_income = $9,
                  aadhaar_number = $10, pan_number = $11, photo = $12,
                  aadhaar_card_image = $13, pan_card_image = $14,
+                 want_family_development_card = $15,
+                 family_member_count = $16,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE id = $15`,
+             WHERE id = $17`,
             [
                 name, dateOfBirth, age, nomineeName, address, phone,
                 gender, occupation, annualIncome,
                 aadhaarNumber, panNumber,
                 photoBuffer, aadhaarBuffer, panBuffer,
+                wantFamilyDevelopmentCard === true,
+                wantFamilyDevelopmentCard ? (familyMemberCount || null) : null,
                 req.params.id
             ]
         );
+
+        // Replace family members (delete + re-insert)
+        await client.query(
+            `DELETE FROM family_members WHERE citizen_id = $1`,
+            [req.params.id]
+        );
+
+        if (
+            wantFamilyDevelopmentCard === true &&
+            Array.isArray(familyMembers) &&
+            familyMembers.length > 0
+        ) {
+            for (let i = 0; i < familyMembers.length; i++) {
+                const m = familyMembers[i];
+                const memberPhotoBuffer = convertImage(m.photo);
+                await client.query(
+                    `INSERT INTO family_members
+                     (citizen_id, member_number, name, relation, age, photo)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        req.params.id,
+                        m.memberNumber || (i + 1),
+                        m.name,
+                        m.relation,
+                        m.age,
+                        memberPhotoBuffer,
+                    ]
+                );
+            }
+        }
 
         await client.query("COMMIT");
 
@@ -330,59 +457,65 @@ router.put("/:id", async (req, res) => {
     }
 });
 
+// ======================================================
+// Get citizen by userId - WITH family members
+// ======================================================
 router.get("/citizen/:userId", async (req, res) => {
-  try {
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM citizens
-      WHERE user_id=$1
-      `,
-      [req.params.userId]
-    );
+    try {
+        const result = await pool.query(
+            `SELECT * FROM citizens WHERE user_id = $1`,
+            [req.params.userId]
+        );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success:false,
-        message:"Citizen not found"
-      });
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Citizen not found"
+            });
+        }
+
+        const c = result.rows[0];
+
+        const base = {
+            ...c,
+            photo: c.photo
+                ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
+                : null,
+            aadhaar_card_image: c.aadhaar_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(c.aadhaar_card_image).toString("base64")}`
+                : null,
+            pan_card_image: c.pan_card_image
+                ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
+                : null,
+        };
+
+        const [withFamily] = await attachFamilyMembers([base]);
+
+        res.json({
+            success: true,
+            citizen: withFamily
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({
+            success: false,
+            message: "Server Error"
+        });
     }
-
-    const c = result.rows[0];
-
-    res.json({
-      success:true,
-      citizen:{
-        ...c,
-        photo: c.photo
-          ? `data:image/jpeg;base64,${Buffer.from(c.photo).toString("base64")}`
-          : null,
-        aadhaar_card_image: c.aadhaar_card_image
-          ? `data:image/jpeg;base64,${Buffer.from(c.aadhaar_card_image).toString("base64")}`
-          : null,
-        pan_card_image: c.pan_card_image
-          ? `data:image/jpeg;base64,${Buffer.from(c.pan_card_image).toString("base64")}`
-          : null,
-      }
-    });
-
-  } catch(err){
-    console.error(err);
-    res.status(500).json({
-      success:false,
-      message:"Server Error"
-    });
-  }
 });
+
+// ======================================================
 // Update citizen verification status
+// ======================================================
 router.put("/:id/status", async (req, res) => {
     const { id } = req.params;
     const { verification_status, rejection_reason } = req.body;
 
     try {
         const result = await pool.query(`
-            UPDATE citizens 
-            SET verification_status = $1, 
+            UPDATE citizens
+            SET verification_status = $1,
                 rejection_reason = $2,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $3
@@ -402,7 +535,7 @@ router.put("/:id/status", async (req, res) => {
                 `SELECT id FROM users WHERE phone_number = $1`,
                 [result.rows[0].phone]
             );
-            
+
             if (userCheck.rows.length > 0) {
                 await pool.query(
                     `UPDATE users SET role = 'citizen' WHERE id = $1`,
@@ -426,7 +559,9 @@ router.put("/:id/status", async (req, res) => {
     }
 });
 
+// ======================================================
 // Delete citizen
+// ======================================================
 router.delete("/:id", async (req, res) => {
     const client = await pool.connect();
 
@@ -448,6 +583,12 @@ router.delete("/:id", async (req, res) => {
         }
 
         const userId = citizen.rows[0].user_id;
+
+        // Delete family members first (defensive; CASCADE would handle it)
+        await client.query(
+            `DELETE FROM family_members WHERE citizen_id = $1`,
+            [req.params.id]
+        );
 
         // Delete from citizens
         await client.query(
@@ -480,11 +621,13 @@ router.delete("/:id", async (req, res) => {
     }
 });
 
+// ======================================================
 // Get citizen statistics
+// ======================================================
 router.get("/stats/:employeeId", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 COUNT(CASE WHEN verification_status = 'pending' THEN 1 END) as pending,
                 COUNT(CASE WHEN verification_status = 'approved' THEN 1 END) as approved,

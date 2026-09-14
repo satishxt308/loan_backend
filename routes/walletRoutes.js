@@ -412,3 +412,11 @@ router.post("/admin/credit-bulk", async (req, res) => {
 });
 
 module.exports = router;
+
+//  SELECT
+//     id,
+//     full_name,
+//     role,
+//     wallet_balance
+// FROM users
+// WHERE id = 52;
